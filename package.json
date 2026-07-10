@@ -1,5 +1,6 @@
 {
   "name": "food-tracker-mcp",
+  "type": "module",
   "version": "0.1.0",
   "private": true,
   "description": "Remote MCP server (Lambda + DynamoDB, deployed with CDK) exposing add_food_item / find_food_item tools for a personal food database.",
@@ -13,23 +14,23 @@
     "destroy": "cdk destroy"
   },
   "devDependencies": {
-    "aws-cdk": "^2.170.0",
-    "esbuild": "^0.25.0",
-    "typescript": "^5.6.0",
-    "ts-node": "^10.9.2",
-    "@types/node": "^22.10.0",
-    "@types/express": "^4.17.21",
-    "@types/aws-lambda": "^8.10.146"
+    "@types/aws-lambda": "^8.10.162",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.1.1",
+    "aws-cdk": "^2.1130.0",
+    "esbuild": "^0.28.1",
+    "tsx": "^4.23.0",
+    "typescript": "^7.0.2"
   },
   "dependencies": {
-    "aws-cdk-lib": "^2.170.0",
-    "constructs": "^10.4.2",
-    "@aws-sdk/client-dynamodb": "^3.699.0",
-    "@aws-sdk/lib-dynamodb": "^3.699.0",
-    "@modelcontextprotocol/sdk": "1.24.2",
-    "dotenv": "^16.4.5",
-    "express": "^4.21.1",
-    "serverless-http": "^3.2.0",
-    "zod": "^3.23.8"
+    "@aws-sdk/client-dynamodb": "^3.1085.0",
+    "@aws-sdk/lib-dynamodb": "^3.1085.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "aws-cdk-lib": "^2.261.0",
+    "constructs": "^10.6.0",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "serverless-http": "^4.0.0",
+    "zod": "^4.4.3"
   }
 }

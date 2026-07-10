@@ -1,5 +1,5 @@
 {
-  "app": "npx ts-node --prefer-ts-exts bin/iac.ts",
+  "app": "npx tsx bin/iac.ts",
   "watch": {
     "include": ["bin/**", "lib/**", "lambda/**"],
     "exclude": ["node_modules", "cdk.out", "**/*.d.ts", "**/*.js"]

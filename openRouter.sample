@@ -1,0 +1,27 @@
+// OpenRouter provides the LLM; Joey MCP Client orchestrates tool calls.
+// You do NOT call this API directly for food logging — configure Joey instead:
+//   1. Settings → Connect OpenRouter (OAuth)
+//   2. Settings → Manage MCP Servers → add your deployed Lambda URL + auth header
+//   3. Start a chat, enable the food-tracker server, pick a model
+//
+// This sample is only useful if you're building your own OpenRouter client
+// with tool-calling support (Joey already does that for you).
+
+fetch("https://openrouter.ai/api/v1/chat/completions", {
+  method: "POST",
+  headers: {
+    Authorization: "Bearer <OPENROUTER_API_KEY>",
+    "HTTP-Referer": "<YOUR_SITE_URL>",
+    "X-Title": "<YOUR_SITE_NAME>",
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    model: "openai/gpt-4o",
+    messages: [
+      {
+        role: "user",
+        content: "What is the meaning of life?",
+      },
+    ],
+  }),
+});

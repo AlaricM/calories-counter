@@ -28,7 +28,7 @@ export class FoodTrackerStack extends cdk.Stack {
 
     // --- Compute --------------------------------------------------------
     const mcpFn = new NodejsFunction(this, "McpServerFunction", {
-      entry: path.join(__dirname, "../lambda/mcp-server/index.ts"),
+      entry: path.join(import.meta.dirname, "../lambda/mcp-server/index.ts"),
       handler: "handler",
       runtime: lambda.Runtime.NODEJS_24_X,
       architecture: lambda.Architecture.ARM_64, // Graviton2: faster + cheaper, pure-JS deps so zero compat risk
@@ -54,15 +54,30 @@ export class FoodTrackerStack extends cdk.Stack {
     // responses the MCP Streamable HTTP transport can use.
     const fnUrl = mcpFn.addFunctionUrl({
       authType: lambda.FunctionUrlAuthType.NONE,
-      cors: { allowedOrigins: ["*"] },
+      cors: {
+        allowedOrigins: ["*"],
+        allowedHeaders: ["Content-Type", "Accept", "Authorization", "Mcp-Session-Id"],
+      },
     });
 
-    // The API key lives in the path (not a header) because Claude's custom
-    // connector UI currently only takes a URL, not custom headers/OAuth.
+    const mcpBaseUrl = `${fnUrl.url}mcp`;
+
     new cdk.CfnOutput(this, "McpServerUrl", {
-      value: `${fnUrl.url}mcp/${props.apiKey}`,
+      value: `${mcpBaseUrl}/${props.apiKey}`,
       description:
-        "Paste this exact URL into Claude → Settings → Connectors → Add custom connector",
+        "Claude custom connector URL (secret embedded in path)",
+    });
+
+    new cdk.CfnOutput(this, "McpServerUrlForJoey", {
+      value: mcpBaseUrl,
+      description:
+        "Joey MCP Client server URL (pair with McpServerAuthHeader)",
+    });
+
+    new cdk.CfnOutput(this, "McpServerAuthHeader", {
+      value: `Authorization: Bearer ${props.apiKey}`,
+      description:
+        "Joey MCP Client auth header (Settings → Manage MCP Servers → Headers)",
     });
   }
 }
