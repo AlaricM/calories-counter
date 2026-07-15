@@ -238,11 +238,14 @@ URL: **Settings → Connectors → Add custom connector**, paste
 
 ## Step 7 — Smoke-test the endpoint (optional)
 
+The server is lenient about request headers — any `Accept` (even `*/*` or none)
+works, and it replies with plain `application/json`:
+
 ```bash
 curl -s -X POST "<McpServerUrl>" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
   -H "Authorization: Bearer <your API key>" \
+  -H "Content-Type: application/json" \
+  -H "Accept: */*" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl-test","version":"0.0.1"}}}'
 ```
 

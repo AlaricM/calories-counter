@@ -135,6 +135,12 @@ env -u AWS_PROFILE -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_
   let the Lambda write keys — key management is admin-only.
 - **Secrets.** API keys are shown once by `manage-users.ts` and stored only as
   hashes. Never log a raw key; never persist one in a fixture or the repo.
+- **HTTP header leniency.** The Streamable HTTP transport rejects any request
+  whose `Accept` doesn't literally contain both `application/json` and
+  `text/event-stream` (a substring check, so `*/*` fails). `index.ts` normalizes
+  the request `Accept`/`Content-Type` and sets `enableJsonResponse: true`, so any
+  client (Postman, curl, `*/*`) works and responses are plain JSON. Don't remove
+  that normalization.
 - **No tests exist yet.** If you add logic to `db.ts`, prefer a small test harness
   over manual DynamoDB pokes; ask before introducing a test framework.
 

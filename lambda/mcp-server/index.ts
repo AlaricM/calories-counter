@@ -5,7 +5,9 @@ import { buildServer } from "./mcp";
 import { resolveUser } from "./users";
 
 const app = express();
-app.use(express.json());
+// Parse JSON bodies regardless of the client's Content-Type, so callers don't
+// have to set it exactly right (headers are normalized again in handleMcpPost).
+app.use(express.json({ type: () => true }));
 
 function extractApiKey(req: Request): string | undefined {
   const auth = req.headers.authorization;
@@ -45,8 +47,22 @@ async function authenticate(req: Request, res: Response, next: NextFunction): Pr
 // authenticated user. Nothing needs to survive between Lambda invocations.
 async function handleMcpPost(req: Request, res: Response): Promise<void> {
   const userId = res.locals.userId as string;
+
+  // The MCP Streamable HTTP transport does a naive substring check on two
+  // headers: Accept must literally contain BOTH "application/json" and
+  // "text/event-stream" (so even "*/*" is rejected), and Content-Type must be
+  // JSON. Normalize them here so any client — Postman, curl, "*/*", or no Accept
+  // header at all — works without hand-crafting headers.
+  req.headers.accept = "application/json, text/event-stream";
+  req.headers["content-type"] = "application/json";
+
   const server = buildServer(userId);
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+  // enableJsonResponse: reply with a single application/json body instead of an
+  // SSE stream — simpler for plain HTTP clients, and still valid for Joey.
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+    enableJsonResponse: true,
+  });
 
   res.on("close", () => {
     transport.close();
