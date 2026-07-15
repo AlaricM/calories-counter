@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { addAlias, addFoodItem, findFoodItem } from "./db";
-import type { AddAliasInput, AddFoodItemInput, FindFoodItemInput } from "../../types.ts";
+import type { AddAliasInput, AddFoodItemInput, FindFoodItemInput } from "../../types";
 
 const addFoodItemSchema = {
   item: z.string().describe("Name of the food item, e.g. 'cheese sticks'"),
@@ -29,13 +29,13 @@ const findFoodItemSchema = {
 };
 
 /**
- * Builds a fresh MCP server + tool set. Called once per request since
- * this Lambda runs stateless (sessionIdGenerator: undefined) — see index.ts.
+ * Builds a fresh MCP server + tool set for a single authenticated user. Called
+ * once per request (this Lambda runs stateless — see index.ts). Every tool is
+ * bound to `userId`, so a caller can only ever read/write their own foods.
  */
-export function buildServer(): McpServer {
+export function buildServer(userId: string): McpServer {
   const server = new McpServer({ name: "food-tracker", version: "0.1.0" });
 
-  // MCP SDK + optional z.array() exceeds TS instantiation depth here.
   server.registerTool(
     "add_food_item",
     {
@@ -46,7 +46,7 @@ export function buildServer(): McpServer {
       inputSchema: addFoodItemSchema,
     },
     async (args: AddFoodItemInput) => {
-      const record = await addFoodItem(args);
+      const record = await addFoodItem(userId, args);
       return {
         content: [{ type: "text", text: `Saved: ${JSON.stringify(record)}` }],
       };
@@ -64,7 +64,7 @@ export function buildServer(): McpServer {
     },
     async ({ food, alias }: AddAliasInput) => {
       try {
-        const record = await addAlias(food, alias);
+        const record = await addAlias(userId, food, alias);
         return {
           content: [{ type: "text", text: `Updated: ${JSON.stringify(record)}` }],
         };
@@ -84,7 +84,7 @@ export function buildServer(): McpServer {
       inputSchema: findFoodItemSchema,
     },
     async ({ query }: FindFoodItemInput) => {
-      const results = await findFoodItem(query);
+      const results = await findFoodItem(userId, query);
       if (results.length === 0) {
         return {
           content: [{ type: "text", text: `No food item found matching "${query}".` }],

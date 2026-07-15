@@ -11,7 +11,9 @@
     "diff": "cdk diff",
     "synth": "cdk synth",
     "deploy": "cdk deploy",
-    "destroy": "cdk destroy"
+    "destroy": "cdk destroy",
+    "user": "tsx scripts/manage-users.ts",
+    "setup": "bash scripts/bootstrap.sh"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.162",

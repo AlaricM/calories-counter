@@ -1,186 +1,318 @@
 # food-tracker-mcp
 
-A remote MCP server for a personal food/calorie database. Deployed with AWS
-CDK onto Lambda + DynamoDB, both of which stay in AWS's "Always Free" tier
-at personal-use scale.
+A tiny **remote MCP server** that acts as long-term memory for a calorie/macro
+counter. You tell a cheap LLM (through the [Joey MCP client](https://benkaiser.github.io/joey-mcp-client/)
++ [OpenRouter](https://openrouter.ai/)) what you ate; the model saves and recalls
+each food's calories and macros from **your own DynamoDB table** — so you don't
+have to re-specify "greek yogurt = 160 cal, 17g protein" every single day.
 
-Exposes three tools to any MCP client:
+The whole point is to make the *model* dumb and the *memory* reliable: even a
+small, inexpensive model can keep an accurate daily food log because the facts
+live in the database, not in the prompt.
 
-- **add_food_item** — store a food's name + calories/macros (with optional aliases)
-- **add_alias** — add an alternative name to an existing food
-- **find_food_item** — look up a previously stored food by name or alias (exact or partial)
+**Multi-user:** one API key = one user. It's just you today, but you can hand a
+friend their own key and their food data is completely separate from yours (each
+user lives in their own DynamoDB partition). Add or revoke users anytime with no
+redeploy.
 
-## Architecture
+Deployed to your personal AWS account with the AWS CDK, running entirely inside
+AWS's permanent **"Always Free"** tier (Lambda + DynamoDB), so at personal scale
+it costs **~$0/month**.
 
-```
-Joey MCP Client (orchestrator)
-  ├─ OpenRouter (LLM: GPT, Claude, Gemini, …)
-  └─ HTTPS ──> Lambda Function URL ──> Lambda (Express + MCP SDK) ──> DynamoDB
-```
+## Tools exposed to the LLM
 
-[Joey MCP Client](https://play.google.com/store/apps/details?id=com.kaiserapps.joey)
-connects to [OpenRouter](https://openrouter.ai/) for the language model and to
-this Lambda endpoint for your food-database tools. Joey runs the agentic loop:
-the model decides when to call `add_food_item` / `find_food_item`, Joey executes
-the tool on your server, and feeds the result back to the model.
+| Tool | What it does |
+|------|--------------|
+| `add_food_item` | Store a food's name + calories/macros (optional aliases, serving size) |
+| `add_alias` | Add an alternative name to an existing food |
+| `find_food_item` | Look up a saved food by name or alias (exact, then partial match) |
 
-Claude's custom-connector UI also works (see below) if you prefer that client.
+Typical conversation: *"add cheese sticks, 50 cal, 6g protein, 2.5g fat"* →
+`add_food_item`. Later: *"I ate two cheese sticks, how much was that?"* →
+`find_food_item` → the model multiplies and answers.
 
-- **DynamoDB**: single table `food-tracker-items`, partition key `itemLower`,
-  provisioned at 5 RCU / 5 WCU (well inside the 25/25 free allowance).
-- **Lambda**: Node.js 24 on arm64/Graviton2, runs an Express app wrapping
-  the MCP TypeScript SDK's `StreamableHTTPServerTransport` in stateless
-  mode. Graviton2 gives faster, cheaper cold starts than x86_64 with zero
-  compatibility risk here since there are no native/compiled dependencies.
-- **Function URL** (not API Gateway): free, and avoids API Gateway's
-  response buffering.
-
-## Folder structure
+## How it works
 
 ```
-food-tracker-mcp/
-├── bin/iac.ts                    CDK app entry point
-├── lib/food-tracker-stack.ts     CDK stack: table, Lambda, Function URL
+Joey MCP Client (phone / desktop — runs the agentic loop)
+  ├─ OpenRouter  ── the LLM (pick a cheap model: GPT-4o-mini, Gemini Flash, Llama…)
+  └─ HTTPS ─────> Lambda Function URL ─> Lambda (Express + MCP SDK) ─> DynamoDB
+                        │
+                        └─ each request carries a per-user API key → scoped to that user
+```
+
+Joey is the orchestrator: the model decides when to call a tool, Joey executes
+the call against your Lambda (sending the user's API key), Lambda resolves the
+key to a `userId` and runs the tool against *only* that user's data, then the
+result flows back to the model. Your Lambda holds no LLM logic and no OpenRouter
+key.
+
+- **Lambda** — Node.js 24 on **arm64/Graviton2**, an Express app wrapping the MCP
+  TypeScript SDK's `StreamableHTTPServerTransport` in **stateless** mode (a fresh
+  server per request — nothing needs to survive between invocations).
+- **Function URL** (not API Gateway) — free, and supports the chunked responses
+  the MCP transport can use. IAM auth is `NONE` **by design**; access is gated
+  per-user by the API key checked inside the Lambda (see [Security](#security)).
+
+### Data model — two DynamoDB tables
+
+**`food-tracker-items`** — composite key isolates each user's foods:
+
+```jsonc
+{
+  "userId":    "usr_9f2c1a",     // partition key — whose food this is
+  "itemLower": "greek yogurt",   // sort key — normalized name (trim + lowercase)
+  "item":      "Greek yogurt",   // display name, original casing
+  "aliases":   ["160 cal greek yogurt"],  // normalized, de-duplicated
+  "calories":  160,
+  "proteinG":  17, "fatG": 0, "carbsG": 9,   // all optional
+  "serving":   "1 container (170g)"          // optional
+}
+```
+
+A lookup is a `Query` on the user's partition, so results can *never* include
+another user's items — isolation is structural, not a filter that could be
+forgotten.
+
+**`food-tracker-users`** — maps an API key to a user:
+
+```jsonc
+{
+  "apiKeyHash": "b1946ac9…",  // partition key — SHA-256 of the API key
+  "userId":     "usr_9f2c1a",
+  "name":       "Alaric",
+  "createdAt":  "2026-07-15T10:40:00.000Z"
+}
+```
+
+Only the **hash** of each key is stored, so a database read can't recover anyone's
+usable credential. The Lambda has **read-only** access to this table; keys are
+minted/revoked by an admin CLI (below) using your deploy credentials.
+
+## Repo layout
+
+```
+calories-counter/
+├── bin/iac.ts                    CDK app entry point (reads optional .env, builds the stack)
+├── lib/food-tracker-stack.ts     CDK stack: 2 DynamoDB tables + Lambda + Function URL + budget
 ├── lambda/mcp-server/
-│   ├── index.ts                  HTTP handler (Express + MCP transport)
-│   ├── mcp.ts                    Tool definitions (add_food_item, find_food_item)
-│   └── db.ts                     DynamoDB read/write helpers
-├── package.json
-├── tsconfig.json
-├── cdk.json
-└── .env.example
+│   ├── index.ts                  HTTP handler: Express + per-user auth + MCP transport
+│   ├── mcp.ts                    MCP tool definitions (bound to a userId)
+│   ├── db.ts                     Food-item read/write helpers (userId-scoped)
+│   ├── users.ts                  Resolve an API key → user (reads the users table)
+│   └── hash.ts                   SHA-256 of an API key (shared by Lambda + admin CLI)
+├── types.ts                      Shared FoodItem / UserRecord / tool I/O types
+├── scripts/
+│   ├── bootstrap.sh              One-command local setup + deploy + first user (macOS)
+│   └── manage-users.ts           Admin CLI: add / list / revoke users
+├── .env.example                  Optional config template (cost alerts)
+├── cdk.json  package.json  tsconfig.json
+└── AGENTS.md                     Orientation for AI coding agents
 ```
 
-## Prerequisites
+---
 
-- Node.js 20+
-- An AWS account with credentials configured locally (`aws configure`)
-- `npx` (ships with npm)
+# From scratch: zero to running
 
-## Setup
+Steps 1–3 are **manual** (you can't script creating an AWS account or IAM user).
+Everything after that is one command: [`scripts/bootstrap.sh`](scripts/bootstrap.sh).
+
+## Step 1 — Create an AWS account (manual)
+
+1. Go to <https://portal.aws.amazon.com/billing/signup> and sign up.
+2. Verify email, phone, and add a payment method (required even for free tier).
+3. **Immediately secure the root user**: sign in as root → **Security
+   credentials** → enable **MFA**. Then stop using root for anything else.
+
+## Step 2 — Create a non-root admin user (manual, IAM hygiene)
+
+Never deploy as the root account. Create a dedicated user instead:
+
+1. Console → **IAM** → **Users** → **Create user** (e.g. `cdk-deployer`).
+2. Attach permissions. For a **solo personal account** the pragmatic choice is
+   the AWS-managed **`AdministratorAccess`** policy — you own everything in the
+   account anyway. (Tighter options in [Security](#security).)
+3. Create the user, then open it → **Security credentials** → **Enable MFA**.
+4. Same page → **Create access key** → *Command Line Interface (CLI)*. Copy the
+   **Access key ID** and **Secret access key** (shown once).
+
+## Step 3 — Point the AWS CLI at that user (manual)
+
+Install the AWS CLI if you don't have it (`brew install awscli`), then:
 
 ```bash
-npm install
-
-cp .env.example .env
-# then edit .env and set MCP_API_KEY to a random secret, e.g.:
-node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"
-
-# first time only, per AWS account/region:
-npx cdk bootstrap
-
-npx cdk deploy
+aws configure
+# AWS Access Key ID:     <paste>
+# AWS Secret Access Key: <paste>
+# Default region name:   us-east-1     # or your preferred region
+# Default output format: json
 ```
 
-`cdk deploy` prints three outputs for wiring up clients:
-
-| Output | Use with |
-|--------|----------|
-| `McpServerUrlForJoey` | Joey MCP Client → server URL |
-| `McpServerAuthHeader` | Joey MCP Client → auth header |
-| `McpServerUrl` | Claude custom connector (secret in path) |
-
-Example Joey values:
-
-```
-URL:     https://abc123xyz.lambda-url.us-east-1.on.aws/mcp
-Headers: Authorization: Bearer 6f1a9c...
-```
-
-⚠️ Treat the API key like a password — anyone who has it can read/write your
-food database. Don't commit `.env` or paste the key somewhere public.
-
-## Connect it to Joey + OpenRouter
-
-1. Install [Joey MCP Client](https://play.google.com/store/apps/details?id=com.kaiserapps.joey)
-   on your phone.
-2. In Joey → **Settings**, connect your [OpenRouter](https://openrouter.ai/)
-   account (OAuth — no API key to manage in the app).
-3. In Joey → **Settings → Manage MCP Servers**, tap **+** and add:
-   - **Name**: `food-tracker` (or anything you like)
-   - **URL**: the `McpServerUrlForJoey` value from `cdk deploy`
-   - **Headers**: paste the `McpServerAuthHeader` value on its own line:
-     ```
-     Authorization: Bearer <your MCP_API_KEY>
-     ```
-4. Start a new chat, pick an OpenRouter model (e.g. `anthropic/claude-sonnet-4`,
-   `openai/gpt-4o`), and enable the food-tracker MCP server for that chat.
-
-Now you can say things like *"add cheese sticks, 50 cal, 6g protein"* or
-*"I ate one cheese stick — how many calories was that?"* and the model will
-call your Lambda tools automatically.
-
-## Connect it to Claude (alternative)
-
-1. In Claude, go to **Settings → Connectors → Add custom connector**.
-2. Paste the full `McpServerUrl` from the `cdk deploy` output (includes the
-   secret in the path).
-3. Save. Enable the connector for a conversation via the "+" button →
-   Connectors.
-
-Now your orchestrator model can call `add_food_item`, `add_alias`, and
-`find_food_item` directly.
-
-## Smoke-testing the deployment
-
-Before wiring it into Joey or Claude, you can sanity-check the endpoint directly:
+Verify it works — this must print your account ID:
 
 ```bash
-# Header auth (Joey style)
-curl -s -X POST "<your McpServerUrlForJoey>" \
+aws sts get-caller-identity
+```
+
+## Step 4 — Everything else, in one command
+
+From the repo root:
+
+```bash
+./scripts/bootstrap.sh          # or: npm run setup
+```
+
+That script (macOS, idempotent, safe to re-run) will:
+
+- install **Homebrew**, **Node** (>=20; via `nvm` if needed), and the **AWS CLI**
+  if any are missing;
+- verify your AWS credentials (fails early with instructions if Step 3 isn't done);
+- run `npm ci`;
+- `cdk bootstrap` (first time per account/region) and `cdk deploy`;
+- create your **first user + API key** and print it (skipped if one already exists).
+
+Copy the printed URL + `Authorization: Bearer <key>` — that's what goes into Joey.
+
+### …or do Step 4 manually
+
+```bash
+# prerequisites (macOS)
+brew install node awscli          # or use nvm to match .nvmrc (Node 24)
+
+# project + deploy
+npm ci
+npx cdk bootstrap                 # first time per account/region only
+npx cdk deploy                    # prints the McpServerUrl output
+
+# create yourself as the first user (prints your key once)
+npm run user -- add --name "Your Name" --url "<McpServerUrl from cdk deploy>"
+```
+
+> Deploying needs **no secret** — auth is per-user and stored (hashed) in
+> DynamoDB. `.env` is optional and only carries cost-alert settings; copy
+> `.env.example` to `.env` and set `ALERT_EMAIL` if you want cost emails.
+
+## Step 5 — Managing users (giving a friend a key)
+
+The admin CLI runs locally with your AWS credentials (the Lambda can't mint keys):
+
+```bash
+# add a friend — prints their key ONCE, plus ready-to-paste Joey settings
+npm run user -- add --name "Jane" --url "<McpServerUrl>"
+
+# see everyone (no secrets shown)
+npm run user -- list
+
+# revoke someone (deletes their key; their stored food data is left intact)
+npm run user -- revoke --name "Jane"
+```
+
+Each `add` mints a brand-new user with its own isolated data. (To give one
+person a *second* key that shares their existing data, pass
+`--user <their userId>`.)
+
+> ⚠️ An API key is a password to that user's food database. It's shown only once
+> on creation — anyone who has it can read/write that user's data.
+
+## Step 6 — Wire up Joey + OpenRouter
+
+1. Install [Joey](https://benkaiser.github.io/joey-mcp-client/) (iOS, Android,
+   macOS; Windows/Linux experimental).
+2. Create an [OpenRouter](https://openrouter.ai/) account → **Keys** → create an
+   API key → paste it into Joey's settings. Pick a **cheap model that supports
+   tool calling** — e.g. `openai/gpt-4o-mini`, `google/gemini-flash-1.5`, or
+   `meta-llama/llama-3.3-70b-instruct`. (Check the model shows a **Tools**
+   capability on <https://openrouter.ai/models> — tool calling is required.)
+3. In Joey, add a remote MCP server:
+   - **URL**: the `McpServerUrl` value
+   - **Headers / auth**: `Authorization: Bearer <your API key>`
+4. Start a chat, enable the food-tracker server, and say
+   *"add cheese sticks, 50 cal, 6g protein"* — the model will call your Lambda.
+
+### Connect Claude instead (alternative)
+
+Claude's custom-connector UI has no header field, so it uses the secret-in-path
+URL: **Settings → Connectors → Add custom connector**, paste
+`<McpServerUrl>/<your API key>`, save, then enable it for a conversation.
+
+## Step 7 — Smoke-test the endpoint (optional)
+
+```bash
+curl -s -X POST "<McpServerUrl>" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -H "Authorization: Bearer <your MCP_API_KEY>" \
+  -H "Authorization: Bearer <your API key>" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl-test","version":"0.0.1"}}}'
 ```
 
-A JSON-RPC response with `result.serverInfo.name: "food-tracker"` means
-it's wired up correctly.
+A response containing `result.serverInfo.name: "food-tracker"` means it's wired
+up. `401` = no key sent; `403` = key not recognized.
 
-## ⚠️ If you're redeploying after an architecture/runtime change
+---
 
-Changing a Lambda's `Architecture` (e.g. x86_64 → arm64) forces
-CloudFormation to **replace** the function rather than update it in place.
-Since the Function URL's hostname is derived from the function's identity,
-**replacing the function changes the URL** — the old one stops working.
+## Security
 
-After running `cdk deploy` for such a change:
-1. Copy the new outputs from the deploy log.
-2. Update the MCP server in Joey (or re-add the custom connector in Claude).
-
-This is a one-time gotcha for this specific kind of change — ordinary code
-or config updates don't replace the function or change the URL.
+- **Per-user isolation.** Food data is partitioned by `userId`; lookups are a
+  `Query` on that partition, so one user physically cannot read another's data.
+- **Keys stored hashed.** The users table holds only `SHA-256(key)`. A leak of
+  the table doesn't expose usable keys, and keys are shown exactly once at
+  creation.
+- **Runtime least privilege, per table.** The Lambda role gets `GetItem` /
+  `PutItem` / `Query` on the items table and **`GetItem` only** on the users
+  table — so a compromised Lambda still can't create or alter keys. Minting keys
+  requires your deploy credentials (`npm run user`).
+- **Public endpoint + key.** The Function URL is `authType: NONE` because Joey
+  can't sign SigV4 requests; access is gated by the per-user API key checked in
+  [`lambda/mcp-server/index.ts`](lambda/mcp-server/index.ts) (Bearer header, or
+  `/mcp/<key>` path for Claude). **Revoke** anyone with `npm run user -- revoke`.
+- **Deploy least privilege (to tighten later).** `AdministratorAccess` on a
+  dedicated non-root user with MFA is the pragmatic solo-account choice. To lock
+  deploys down further, use a CDK **permissions boundary** and a scoped
+  CloudFormation execution policy — see `cdk bootstrap --help`
+  (`--cloudformation-execution-policies`, `--custom-permissions-boundary`).
+- **Stronger auth?** For real OAuth per user instead of shared bearer keys, see
+  the [MCP authorization spec](https://modelcontextprotocol.io/specification);
+  Joey supports OAuth MCP servers. The key model here is plenty for you + friends.
 
 ## Cost
 
-Lambda and DynamoDB are both in AWS's permanent "Always Free" tier (not the
-12-month-only tier), so a single-user food log realistically costs **$0/month
-indefinitely**. Set a AWS Budgets billing alarm as a safety net anyway —
-free tier limits still apply, and AWS bills automatically past them with no
-built-in warning. Avoid adding a VPC/NAT Gateway to this stack; that's the
-most common source of surprise charges, and this project doesn't need one.
+Lambda and DynamoDB here are in AWS's **permanent** Always-Free tier (not the
+12-month-only tier). The free DynamoDB allowance (**25 GB + 25 RCU + 25 WCU**) is
+**shared across all tables in the account**, and the two small tables here
+provision only 10 RCU / 6 WCU combined — so a personal food log realistically
+costs **$0/month indefinitely**. As a safety net, the stack provisions an **AWS
+Budgets** cost alarm (default **$1/month**) that emails you if anything ever costs
+money — set `ALERT_EMAIL` in `.env`, tune with `MONTHLY_BUDGET_USD`.
 
-## Security notes
+Avoid adding a VPC/NAT Gateway — that's the most common source of surprise AWS
+charges, and this project doesn't need one.
 
-- Auth accepts either a `Authorization: Bearer <key>` header (Joey and most
-  MCP clients) or the key embedded in the URL path (Claude custom connector,
-  which doesn't expose a header field).
-- If you want real per-user auth (e.g. sharing this with other people),
-  you'd want to implement OAuth 2.1 on the Lambda instead — see the [MCP
-  authorization spec](https://modelcontextprotocol.io/specification) and
-  Joey's support for OAuth MCP servers. Out of scope for this single-user
-  setup.
+## Redeploying after an architecture/runtime change ⚠️
 
-## Known issue to watch
+Changing the Lambda's `Architecture` (e.g. x86_64 → arm64) forces CloudFormation
+to **replace** the function. The Function URL's hostname is derived from the
+function's identity, so **replacing the function changes the URL** — the old one
+stops working. After such a deploy, copy the new `McpServerUrl` and re-give it to
+each user's client. Ordinary code/config updates don't replace the function and
+don't change the URL. (The same applies to changing a table's key schema — it
+replaces the table; with `RemovalPolicy.RETAIN` you'd need to drop the old one
+first. There's no data yet, so it's a non-issue on first deploy.)
 
-`@modelcontextprotocol/sdk` is pinned to `1.24.2` in `package.json`
-(not a `^` range) because versions `1.25.0+` have a reported regression
-with Lambda Function URLs (see [typescript-sdk#1417](https://github.com/modelcontextprotocol/typescript-sdk/issues/1417)).
-Check that issue before bumping the SDK version.
+## Dependency note
+
+`@modelcontextprotocol/sdk` is on `^1.29.0`. Some earlier `1.25.x` releases had a
+reported regression with Lambda Function URLs
+([typescript-sdk#1417](https://github.com/modelcontextprotocol/typescript-sdk/issues/1417));
+if you bump the SDK and streaming breaks, check that issue and the smoke test above.
 
 ## Useful commands
 
-- `npx cdk diff` — see what would change before deploying
-- `npx cdk deploy` — deploy/update the stack
-- `npx cdk destroy` — tear everything down (the DynamoDB table has
-  `RemovalPolicy.RETAIN`, so your food data survives even this)
+| Command | What it does |
+|---------|--------------|
+| `npm run setup` | Full from-scratch install + deploy + first user (macOS) |
+| `npm run build` | Type-check the whole project (`tsc --noEmit`) — no AWS calls |
+| `npm run user -- <add\|list\|revoke>` | Manage users / API keys |
+| `npx cdk diff` | Show what a deploy would change |
+| `npx cdk synth` | Synthesize the CloudFormation template locally |
+| `npx cdk deploy` | Deploy / update the stack |
+| `npx cdk destroy` | Tear down (both tables are `RETAIN`, so data survives) |

@@ -7,3 +7,4 @@ cdk.out/
 .DS_Store
 *.log
 .cdk.staging/
+cdk-outputs.json

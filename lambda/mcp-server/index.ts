@@ -2,8 +2,7 @@ import express, { Request, Response, NextFunction } from "express";
 import serverlessHttp from "serverless-http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { buildServer } from "./mcp";
-
-const API_KEY = process.env.MCP_API_KEY;
+import { resolveUser } from "./users";
 
 const app = express();
 app.use(express.json());
@@ -12,24 +11,41 @@ function extractApiKey(req: Request): string | undefined {
   const auth = req.headers.authorization;
   if (typeof auth === "string" && auth.startsWith("Bearer ")) {
     return auth.slice("Bearer ".length).trim();
-  } else return undefined;
+  }
+  // Fallback: secret embedded in the URL path (Claude custom connector, which
+  // exposes no header field). The /mcp/:token route puts it in req.params.token.
+  const token = req.params.token;
+  return typeof token === "string" && token.length > 0 ? token : undefined;
 }
 
-// Accept the shared secret either as a Bearer token (Joey MCP Client) or
-// embedded in the URL path (Claude custom connector).
-function checkAuth(req: Request, res: Response, next: NextFunction): void {
-  if (!API_KEY || extractApiKey(req) !== API_KEY) {
-    res.status(403).json({ error: "forbidden" });
+// Resolve the caller's API key to a user and stash the userId for the handler.
+// One key = one user; every tool call is scoped to res.locals.userId, so users
+// can never read or write each other's food data.
+async function authenticate(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const key = extractApiKey(req);
+  if (!key) {
+    res.status(401).json({ error: "unauthorized" });
     return;
   }
-  next();
+  try {
+    const user = await resolveUser(key);
+    if (!user) {
+      res.status(403).json({ error: "forbidden" });
+      return;
+    }
+    res.locals.userId = user.userId;
+    next();
+  } catch (err) {
+    console.error("auth error", err);
+    res.status(500).json({ error: "auth failure" });
+  }
 }
 
-// Stateless mode: a fresh McpServer + transport per request. Nothing needs
-// to survive between Lambda invocations, which suits Lambda's execution
-// model (any invocation can land on a different container).
+// Stateless mode: a fresh McpServer + transport per request, bound to the
+// authenticated user. Nothing needs to survive between Lambda invocations.
 async function handleMcpPost(req: Request, res: Response): Promise<void> {
-  const server = buildServer();
+  const userId = res.locals.userId as string;
+  const server = buildServer(userId);
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
 
   res.on("close", () => {
@@ -62,9 +78,9 @@ function handleMcpGet(_req: Request, res: Response): void {
   });
 }
 
-app.post("/mcp", checkAuth, handleMcpPost);
-app.get("/mcp", checkAuth, handleMcpGet);
-app.post("/mcp/:token", checkAuth, handleMcpPost);
-app.get("/mcp/:token", checkAuth, handleMcpGet);
+app.post("/mcp", authenticate, handleMcpPost);
+app.get("/mcp", authenticate, handleMcpGet);
+app.post("/mcp/:token", authenticate, handleMcpPost);
+app.get("/mcp/:token", authenticate, handleMcpGet);
 
 export const handler = serverlessHttp(app);

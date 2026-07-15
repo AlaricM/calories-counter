@@ -3,27 +3,47 @@ import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as budgets from "aws-cdk-lib/aws-budgets";
 import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 
 interface FoodTrackerStackProps extends cdk.StackProps {
-  /** Shared-secret token embedded in the MCP server's URL path. */
-  apiKey: string;
+  /** Optional email address for AWS Budgets cost alerts. */
+  alertEmail?: string;
+  /** Monthly budget ceiling in USD that trips the cost alarm. Default: 1. */
+  monthlyBudgetUsd?: number;
 }
 
 export class FoodTrackerStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props: FoodTrackerStackProps) {
+  constructor(scope: Construct, id: string, props: FoodTrackerStackProps = {}) {
     super(scope, id, props);
 
-    // --- Storage -----------------------------------------------------
-    // Provisioned (not on-demand) so this stays inside DynamoDB's
-    // "Always Free" 25 RCU / 25 WCU allowance indefinitely.
-    const table = new dynamodb.Table(this, "FoodItemsTable", {
+    // --- Storage: food items -------------------------------------------
+    // Composite key isolates each user's foods in their own partition:
+    //   partition = userId, sort = itemLower (normalized name).
+    // A lookup is a Query scoped to userId, so one user can never read another's
+    // data. Provisioned (not on-demand) to stay in DynamoDB's Always-Free
+    // 25 RCU / 25 WCU allowance, which is shared across all tables in the account.
+    const itemsTable = new dynamodb.Table(this, "FoodItemsTable", {
       tableName: "food-tracker-items",
-      partitionKey: { name: "itemLower", type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: "userId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "itemLower", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PROVISIONED,
       readCapacity: 5,
       writeCapacity: 5,
-      removalPolicy: cdk.RemovalPolicy.RETAIN, // don't lose your food log on `cdk destroy`
+      removalPolicy: cdk.RemovalPolicy.RETAIN, // don't lose food logs on `cdk destroy`
+    });
+
+    // --- Storage: users (API keys) -------------------------------------
+    // partition = apiKeyHash (SHA-256 of the key). One key = one user. Reads on
+    // every request (auth); writes are rare (admin adds/revokes users), hence
+    // low write capacity.
+    const usersTable = new dynamodb.Table(this, "UsersTable", {
+      tableName: "food-tracker-users",
+      partitionKey: { name: "apiKeyHash", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PROVISIONED,
+      readCapacity: 5,
+      writeCapacity: 1,
+      removalPolicy: cdk.RemovalPolicy.RETAIN, // don't lock everyone out on `cdk destroy`
     });
 
     // --- Compute --------------------------------------------------------
@@ -31,27 +51,35 @@ export class FoodTrackerStack extends cdk.Stack {
       entry: path.join(import.meta.dirname, "../lambda/mcp-server/index.ts"),
       handler: "handler",
       runtime: lambda.Runtime.NODEJS_24_X,
-      architecture: lambda.Architecture.ARM_64, // Graviton2: faster + cheaper, pure-JS deps so zero compat risk
+      architecture: lambda.Architecture.ARM_64, // Graviton2: faster + cheaper; pure-JS deps so zero compat risk
       memorySize: 256,
       timeout: cdk.Duration.seconds(15),
       environment: {
-        TABLE_NAME: table.tableName,
-        MCP_API_KEY: props.apiKey,
+        TABLE_NAME: itemsTable.tableName,
+        USERS_TABLE_NAME: usersTable.tableName,
       },
       bundling: {
         minify: true,
         sourceMap: false,
-        // No explicit `target` — NodejsFunction derives a matching esbuild
-        // target from `runtime` automatically, which avoids depending on
-        // esbuild's version having already added an explicit "node24" target string.
+        // No explicit `target`: NodejsFunction derives a matching esbuild
+        // target from `runtime`, so we don't depend on esbuild already knowing
+        // a "node24" target string.
       },
     });
 
-    table.grantReadWriteData(mcpFn);
+    // Least privilege, per table:
+    //   items — exactly the actions the code uses (Get / Put / Query).
+    //   users — READ ONLY. The Lambda authenticates against this table but must
+    //           never be able to mint or alter keys; that's an admin-only op
+    //           (scripts/manage-users.ts, run with your deploy credentials).
+    itemsTable.grant(mcpFn, "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Query");
+    usersTable.grant(mcpFn, "dynamodb:GetItem");
 
-    // --- Public HTTPS endpoint -------------------------------------------
+    // --- Public HTTPS endpoint ------------------------------------------
     // Function URLs are free and, unlike API Gateway, support the chunked
-    // responses the MCP Streamable HTTP transport can use.
+    // responses the MCP Streamable HTTP transport can use. IAM auth is NONE by
+    // design (Joey can't sign SigV4 requests); access is gated per-user by the
+    // API key checked inside the Lambda — see lambda/mcp-server/index.ts.
     const fnUrl = mcpFn.addFunctionUrl({
       authType: lambda.FunctionUrlAuthType.NONE,
       cors: {
@@ -60,24 +88,52 @@ export class FoodTrackerStack extends cdk.Stack {
       },
     });
 
-    const mcpBaseUrl = `${fnUrl.url}mcp`;
+    // --- Cost guardrail -------------------------------------------------
+    // Everything above sits in the permanent Always-Free tier, so any nonzero
+    // spend is a signal that something is misconfigured. A tiny monthly budget
+    // acts as a canary. Email alerts are added only if ALERT_EMAIL is set.
+    const notificationsWithSubscribers = props.alertEmail
+      ? [
+          {
+            notification: {
+              notificationType: "ACTUAL",
+              comparisonOperator: "GREATER_THAN",
+              threshold: 80,
+              thresholdType: "PERCENTAGE",
+            },
+            subscribers: [{ subscriptionType: "EMAIL", address: props.alertEmail }],
+          },
+          {
+            notification: {
+              notificationType: "FORECASTED",
+              comparisonOperator: "GREATER_THAN",
+              threshold: 100,
+              thresholdType: "PERCENTAGE",
+            },
+            subscribers: [{ subscriptionType: "EMAIL", address: props.alertEmail }],
+          },
+        ]
+      : undefined;
 
+    new budgets.CfnBudget(this, "MonthlyCostBudget", {
+      budget: {
+        budgetName: "food-tracker-monthly",
+        budgetType: "COST",
+        timeUnit: "MONTHLY",
+        budgetLimit: { amount: props.monthlyBudgetUsd ?? 1, unit: "USD" },
+      },
+      notificationsWithSubscribers,
+    });
+
+    // --- Output ---------------------------------------------------------
+    // One base URL for everyone. Each user's own API key (from
+    // `npm run user -- add`) is what authenticates them:
+    //   Joey   -> use this URL + header  `Authorization: Bearer <their key>`
+    //   Claude -> use  <this URL>/<their key>  (secret in the path)
     new cdk.CfnOutput(this, "McpServerUrl", {
-      value: `${mcpBaseUrl}/${props.apiKey}`,
+      value: `${fnUrl.url}mcp`,
       description:
-        "Claude custom connector URL (secret embedded in path)",
-    });
-
-    new cdk.CfnOutput(this, "McpServerUrlForJoey", {
-      value: mcpBaseUrl,
-      description:
-        "Joey MCP Client server URL (pair with McpServerAuthHeader)",
-    });
-
-    new cdk.CfnOutput(this, "McpServerAuthHeader", {
-      value: `Authorization: Bearer ${props.apiKey}`,
-      description:
-        "Joey MCP Client auth header (Settings → Manage MCP Servers → Headers)",
+        "Base MCP endpoint. Create a key with `npm run user -- add`; Joey uses this URL + a Bearer header, Claude uses <url>/<key>.",
     });
   }
 }
