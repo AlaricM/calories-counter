@@ -97,7 +97,8 @@ calories-counter/
 ├── lib/food-tracker-stack.ts     CDK stack: 2 DynamoDB tables + Lambda + Function URL + budget
 ├── lambda/mcp-server/
 │   ├── index.ts                  HTTP handler: Express + per-user auth + MCP transport
-│   ├── mcp.ts                    MCP tool definitions (bound to a userId)
+│   ├── mcp.ts                    MCP tool definitions + system-prompt wiring (bound to a userId)
+│   ├── system-prompt.ts          The always-on counter persona (edit your targets here)
 │   ├── db.ts                     Food-item read/write helpers (userId-scoped)
 │   ├── users.ts                  Resolve an API key → user (reads the users table)
 │   └── hash.ts                   SHA-256 of an API key (shared by Lambda + admin CLI)
@@ -249,6 +250,32 @@ A response containing `result.serverInfo.name: "food-tracker"` means it's wired
 up. `401` = no key sent; `403` = key not recognized.
 
 ---
+
+## Give the LLM a consistent persona
+
+You almost certainly want the model to behave the same way in every chat — *"you
+are my calorie counter; macros must sum to calories; if fat runs high, cut carbs
+rather than raise the calorie cap,"* and so on. That text lives in one place:
+[`lambda/mcp-server/system-prompt.ts`](lambda/mcp-server/system-prompt.ts) —
+**edit the "Daily targets" block to your own numbers.**
+
+It reaches the model up to three ways:
+
+1. **Automatic (server `instructions`).** The server advertises the prompt in its
+   MCP handshake; clients that honor MCP instructions add it to the system prompt
+   for you, so it applies to every conversation with no per-chat setup. Push
+   changes with `npx cdk deploy`.
+2. **On demand (`counter_context` prompt).** The server also exposes it as an MCP
+   *prompt*, for clients that support prompts but don't auto-apply instructions —
+   insert it from the client's prompt/slash menu.
+3. **Guaranteed (paste into your client).** Whether a given client auto-applies
+   (1) isn't guaranteed, so for a hard guarantee also paste the same text into
+   Joey's **system-prompt / custom-instructions** field (or an OpenRouter system
+   message if you build your own client). Copy it straight from the file above.
+
+> Multi-user note: the server sends the **same** instructions to every API key, so
+> keep personal specifics light — each person can set their own daily targets in
+> their own client.
 
 ## Security
 

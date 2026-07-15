@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { addAlias, addFoodItem, findFoodItem } from "./db";
+import { SYSTEM_PROMPT } from "./system-prompt";
 import type { AddAliasInput, AddFoodItemInput, FindFoodItemInput } from "../../types";
 
 const addFoodItemSchema = {
@@ -34,7 +35,13 @@ const findFoodItemSchema = {
  * bound to `userId`, so a caller can only ever read/write their own foods.
  */
 export function buildServer(userId: string): McpServer {
-  const server = new McpServer({ name: "food-tracker", version: "0.1.0" });
+  // `instructions` is surfaced in the MCP initialize result; per the spec a
+  // client MAY add it to the model's system prompt, giving every conversation
+  // the same counting rules without any per-chat setup.
+  const server = new McpServer(
+    { name: "food-tracker", version: "0.1.0" },
+    { instructions: SYSTEM_PROMPT }
+  );
 
   server.registerTool(
     "add_food_item",
@@ -92,6 +99,20 @@ export function buildServer(userId: string): McpServer {
       }
       return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
     }
+  );
+
+  // Also expose the same context as a prompt, for clients that support MCP
+  // prompts but don't auto-apply `instructions`. The user inserts it on demand.
+  server.registerPrompt(
+    "counter_context",
+    {
+      title: "Calorie & macro counter context",
+      description:
+        "Insert the always-on rules for the personal calorie/macro counter (targets, macro math, how to allocate the day).",
+    },
+    () => ({
+      messages: [{ role: "user", content: { type: "text", text: SYSTEM_PROMPT } }],
+    })
   );
 
   return server;

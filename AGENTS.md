@@ -43,7 +43,8 @@ Joey → HTTPS POST /mcp (+ user's API key) → Lambda Function URL → Express
 | `bin/iac.ts` | CDK app entry | Loads `.env` for optional `ALERT_EMAIL`/`MONTHLY_BUDGET_USD`. No secret needed to deploy. |
 | `lib/food-tracker-stack.ts` | The whole stack | 2 tables, Lambda, Function URL, per-table IAM grants, Budgets alarm, one CfnOutput. |
 | `lambda/mcp-server/index.ts` | HTTP handler | Express + `serverless-http`; async `authenticate`; routes `/mcp` and `/mcp/:token`. |
-| `lambda/mcp-server/mcp.ts` | Tool definitions | `buildServer(userId)`; Zod schemas; thin wrappers over `db.ts`. |
+| `lambda/mcp-server/mcp.ts` | Tool definitions | `buildServer(userId)`; Zod schemas; thin wrappers over `db.ts`; wires the system prompt. |
+| `lambda/mcp-server/system-prompt.ts` | The always-on counter persona | Single source of truth; shipped as server `instructions` + the `counter_context` prompt. Edit daily targets here. |
 | `lambda/mcp-server/db.ts` | Food-item helpers | `addFoodItem`/`addAlias`/`findFoodItem`, all `(userId, …)`. Normalization lives here. |
 | `lambda/mcp-server/users.ts` | Auth lookup | `resolveUser(apiKey)` → reads users table by key hash. |
 | `lambda/mcp-server/hash.ts` | `hashApiKey()` | SHA-256; **shared** with the admin CLI so both hash identically. |
@@ -141,6 +142,9 @@ env -u AWS_PROFILE -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_
 
 - **New tool** → Zod schema + `registerTool` in `mcp.ts` (bind `userId`), a helper
   in `db.ts` (`(userId, …)`), and any new shape in `types.ts`.
+- **Change the LLM's behavior / persona** → `system-prompt.ts` (single source).
+  It's the server `instructions` + `counter_context` prompt; redeploy to update
+  the server copy. Same text for all users, so keep it non-personal.
 - **New stored food field** → extend `FoodItem` + `AddFoodItemInput` in `types.ts`,
   the schema in `mcp.ts`, and the record built in `db.ts:addFoodItem`.
 - **User/auth change** → `users.ts` (lookup), `index.ts` (`authenticate`),
