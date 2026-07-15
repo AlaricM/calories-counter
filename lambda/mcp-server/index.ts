@@ -43,18 +43,32 @@ async function authenticate(req: Request, res: Response, next: NextFunction): Pr
   }
 }
 
+// serverless-http builds the Lambda request with an EMPTY `rawHeaders` array,
+// but the MCP transport (via @hono/node-server) reads request headers ONLY from
+// `rawHeaders` — so without this, every request 406s regardless of what the
+// client sends (this affects all clients, Joey included). We force the two
+// headers the transport is picky about (its Accept check is a naive substring
+// match that even rejects "*/*"), then rebuild rawHeaders from req.headers.
+function normalizeHeadersForTransport(req: Request): void {
+  req.headers.accept = "application/json, text/event-stream";
+  req.headers["content-type"] = "application/json";
+  const raw: string[] = [];
+  for (const [key, value] of Object.entries(req.headers)) {
+    if (Array.isArray(value)) {
+      for (const v of value) raw.push(key, v);
+    } else if (value !== undefined) {
+      raw.push(key, value);
+    }
+  }
+  req.rawHeaders = raw;
+}
+
 // Stateless mode: a fresh McpServer + transport per request, bound to the
 // authenticated user. Nothing needs to survive between Lambda invocations.
 async function handleMcpPost(req: Request, res: Response): Promise<void> {
   const userId = res.locals.userId as string;
 
-  // The MCP Streamable HTTP transport does a naive substring check on two
-  // headers: Accept must literally contain BOTH "application/json" and
-  // "text/event-stream" (so even "*/*" is rejected), and Content-Type must be
-  // JSON. Normalize them here so any client — Postman, curl, "*/*", or no Accept
-  // header at all — works without hand-crafting headers.
-  req.headers.accept = "application/json, text/event-stream";
-  req.headers["content-type"] = "application/json";
+  normalizeHeadersForTransport(req);
 
   const server = buildServer(userId);
   // enableJsonResponse: reply with a single application/json body instead of an

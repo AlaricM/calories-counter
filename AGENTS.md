@@ -135,12 +135,17 @@ env -u AWS_PROFILE -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_
   let the Lambda write keys — key management is admin-only.
 - **Secrets.** API keys are shown once by `manage-users.ts` and stored only as
   hashes. Never log a raw key; never persist one in a fixture or the repo.
-- **HTTP header leniency.** The Streamable HTTP transport rejects any request
-  whose `Accept` doesn't literally contain both `application/json` and
-  `text/event-stream` (a substring check, so `*/*` fails). `index.ts` normalizes
-  the request `Accept`/`Content-Type` and sets `enableJsonResponse: true`, so any
-  client (Postman, curl, `*/*`) works and responses are plain JSON. Don't remove
-  that normalization.
+- **HTTP header handling (read before touching `index.ts`).** `serverless-http`
+  builds the Lambda request with an **empty `rawHeaders`** array, and the MCP
+  transport (via `@hono/node-server`) reads request headers **only** from
+  `rawHeaders` — so without intervention *every* request 406s ("must accept both
+  application/json and text/event-stream"), for all clients including Joey.
+  `normalizeHeadersForTransport()` forces Accept/Content-Type **and rebuilds
+  `req.rawHeaders` from `req.headers`** — the rawHeaders rebuild is the
+  load-bearing part; do not remove it. Also note the transport's Accept check is a
+  naive substring match (even `*/*` fails). `enableJsonResponse: true` makes
+  responses plain JSON. Verified: without this, a real `*/*` request → 406; with
+  it → 200.
 - **No tests exist yet.** If you add logic to `db.ts`, prefer a small test harness
   over manual DynamoDB pokes; ask before introducing a test framework.
 
