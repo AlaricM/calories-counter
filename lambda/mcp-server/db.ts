@@ -236,3 +236,72 @@ export async function listDailyEntries(
   );
   return (result.Items as DailyTrackerEntry[]) ?? [];
 }
+
+export async function deleteDailyEntry(
+  userId: string,
+  day = getCentralDateKey(),
+  order: number
+): Promise<DailyTrackerEntry> {
+  const dayOrder = toDailySortKey(day, order);
+  const existing = await doc.send(
+    new GetCommand({ TableName: DAILY_TABLE_NAME, Key: { userId, dayOrder } })
+  );
+  if (!existing.Item) {
+    throw new Error(`Daily entry not found for ${day} order ${order}.`);
+  }
+
+  const deleted = existing.Item as DailyTrackerEntry;
+  await doc.send(
+    new DeleteCommand({ TableName: DAILY_TABLE_NAME, Key: { userId, dayOrder } })
+  );
+
+  const later = await doc.send(
+    new QueryCommand({
+      TableName: DAILY_TABLE_NAME,
+      KeyConditionExpression: "#u = :u AND begins_with(#k, :dayPrefix)",
+      ExpressionAttributeNames: { "#u": "userId", "#k": "dayOrder" },
+      ExpressionAttributeValues: { ":u": userId, ":dayPrefix": `${day}#` },
+      ScanIndexForward: true,
+    })
+  );
+
+  let previousTotals = {
+    cumulativeCalories: deleted.order > 1 ? deleted.cumulativeCalories - deleted.calories : 0,
+    cumulativeProteinG: deleted.order > 1 ? deleted.cumulativeProteinG - deleted.proteinG : 0,
+    cumulativeFatG: deleted.order > 1 ? deleted.cumulativeFatG - deleted.fatG : 0,
+    cumulativeCarbsG: deleted.order > 1 ? deleted.cumulativeCarbsG - deleted.carbsG : 0,
+  };
+
+  let nextOrder = deleted.order;
+  const laterEntries = ((later.Items as DailyTrackerEntry[]) ?? []).filter(
+    (entry) => entry.order > order
+  );
+  for (const entry of laterEntries) {
+    const updated: DailyTrackerEntry = {
+      ...entry,
+      order: nextOrder,
+      dayOrder: toDailySortKey(day, nextOrder),
+      cumulativeCalories: previousTotals.cumulativeCalories + entry.calories,
+      cumulativeProteinG: previousTotals.cumulativeProteinG + entry.proteinG,
+      cumulativeFatG: previousTotals.cumulativeFatG + entry.fatG,
+      cumulativeCarbsG: previousTotals.cumulativeCarbsG + entry.carbsG,
+    };
+
+    await doc.send(new PutCommand({ TableName: DAILY_TABLE_NAME, Item: updated }));
+    if (updated.dayOrder !== entry.dayOrder) {
+      await doc.send(
+        new DeleteCommand({ TableName: DAILY_TABLE_NAME, Key: { userId, dayOrder: entry.dayOrder } })
+      );
+    }
+
+    previousTotals = {
+      cumulativeCalories: updated.cumulativeCalories,
+      cumulativeProteinG: updated.cumulativeProteinG,
+      cumulativeFatG: updated.cumulativeFatG,
+      cumulativeCarbsG: updated.cumulativeCarbsG,
+    };
+    nextOrder += 1;
+  }
+
+  return deleted;
+}

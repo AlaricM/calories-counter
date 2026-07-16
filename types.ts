@@ -30,6 +30,11 @@ export type ListDailyEntriesInput = {
     day?: string;
 }
 
+export type DeleteDailyEntryInput = {
+    day?: string;
+    order: number;
+}
+
 export type DailyTrackerEntry = {
     userId: string;
     dayOrder: string;

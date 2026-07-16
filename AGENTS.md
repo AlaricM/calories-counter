@@ -45,7 +45,7 @@ Joey → HTTPS POST /mcp (+ user's API key) → Lambda Function URL → Express
 | `lambda/mcp-server/index.ts` | HTTP handler | Express + `serverless-http`; async `authenticate`; routes `/mcp` and `/mcp/:token`. |
 | `lambda/mcp-server/mcp.ts` | Tool definitions | `buildServer(userId)`; Zod schemas; thin wrappers over `db.ts`; wires the system prompt. |
 | `lambda/mcp-server/system-prompt.ts` | The always-on counter persona | Single source of truth; shipped as server `instructions` + the `counter_context` prompt. Edit daily targets here. |
-| `lambda/mcp-server/db.ts` | Food-item helpers | `addFoodItem`/`addAlias`/`findFoodItem`, all `(userId, …)`. Normalization lives here. |
+| `lambda/mcp-server/db.ts` | Food-item helpers | `addFoodItem`/`addAlias`/`findFoodItem`/`addFoodToDailyCount`/`listDailyEntries`/`deleteDailyEntry`, all `(userId, …)`. Normalization and daily tracker logic live here. |
 | `lambda/mcp-server/users.ts` | Auth lookup | `resolveUser(apiKey)` → reads users table by key hash. |
 | `lambda/mcp-server/hash.ts` | `hashApiKey()` | SHA-256; **shared** with the admin CLI so both hash identically. |
 | `types.ts` | Shared types | `FoodItem`, `UserRecord`, tool I/O. |
@@ -67,6 +67,29 @@ Joey → HTTPS POST /mcp (+ user's API key) → Lambda Function URL → Express
 
 **`food-tracker-users`** — partition `apiKeyHash` → `{ userId, name, createdAt }`.
 Only the SHA-256 **hash** of the key is stored.
+
+**`food-tracker-daily`** — partition `userId`, sort `dayOrder`:
+
+```jsonc
+{
+  "userId": "usr_9f2c1a",
+  "dayOrder": "2026-07-15#0001",
+  "day": "2026-07-15",
+  "order": 1,
+  "item": "Apple",
+  "calories": 95,
+  "proteinG": 0,
+  "fatG": 0,
+  "carbsG": 25,
+  "cumulativeCalories": 95,
+  "cumulativeProteinG": 0,
+  "cumulativeFatG": 0,
+  "cumulativeCarbsG": 25,
+  "serving": "1 medium"
+}
+```
+
+The daily tracker stores each logged item for a Central Time day, including item order and running totals. `addFoodToDailyCount` appends a new entry, `listDailyEntries` returns the day's entries, and `deleteDailyEntry` removes one entry while renumbering later rows and recomputing cumulative totals.
 
 **Invariants:**
 - Every food write MUST include both `userId` (PK) and `itemLower` (SK). Missing

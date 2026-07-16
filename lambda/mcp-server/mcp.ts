@@ -1,11 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { addAlias, addFoodItem, addFoodToDailyCount, deleteFoodItem, findFoodItem, listDailyEntries } from "./db";
+import { addAlias, addFoodItem, addFoodToDailyCount, deleteDailyEntry, deleteFoodItem, findFoodItem, listDailyEntries } from "./db";
 import { SYSTEM_PROMPT } from "./system-prompt";
 import type {
   AddAliasInput,
   AddFoodItemInput,
   AddFoodToDailyCountInput,
+  DeleteDailyEntryInput,
   DeleteFoodItemInput,
   FindFoodItemInput,
   ListDailyEntriesInput,
@@ -180,6 +181,37 @@ export function buildServer(userId: string): McpServer {
         };
       } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to log food to daily tracker.";
+        return { content: [{ type: "text", text: message }] };
+      }
+    }
+  );
+
+  server.registerTool(
+    "delete_daily_entry",
+    {
+      description:
+        "Delete a single entry from today's daily tracker without removing the food from the saved food database. Use this to correct an eaten item that was logged by mistake.",
+      inputSchema: {
+        day: z
+          .string()
+          .optional()
+          .describe("Optional date in yyyy-mm-dd format. Defaults to today in Central Time."),
+        order: z.number().describe("The entry order number to remove from the day's tracker."),
+      },
+    },
+    async ({ day, order }: DeleteDailyEntryInput) => {
+      try {
+        const record = await deleteDailyEntry(userId, day, order);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Deleted daily entry ${order} for ${record.day}: ${record.item} (${record.calories} cal).`,
+            },
+          ],
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to delete daily entry.";
         return { content: [{ type: "text", text: message }] };
       }
     }

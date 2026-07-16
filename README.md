@@ -26,11 +26,14 @@ it costs **~$0/month**.
 | `add_food_item` | Store a food's name + calories/macros (optional aliases, serving size) |
 | `add_alias` | Add an alternative name to an existing food |
 | `find_food_item` | Look up a saved food by name or alias (exact, then partial match) |
+| `add_food_to_daily_count` | Append a known food to today's daily tracker and update cumulative totals |
+| `list_daily_entries` | List today's daily tracked food entries and cumulative totals |
+| `delete_daily_entry` | Remove a single entry from today's daily tracker without deleting the saved food |
 | `delete_food_item` | Delete a saved food item by canonical name |
 
 Typical conversation: *"add cheese sticks, 50 cal, 6g protein, 2.5g fat"* →
 `add_food_item`. Later: *"I ate two cheese sticks, how much was that?"* →
-`find_food_item` → the model multiplies and answers.
+`find_food_item` → the model multiplies and answers. When the user says *"I ate an apple today"* the model should use `add_food_to_daily_count`, and when the user wants a summary it should use `list_daily_entries`.
 
 ## How it works
 
@@ -55,7 +58,7 @@ key.
   the MCP transport can use. IAM auth is `NONE` **by design**; access is gated
   per-user by the API key checked inside the Lambda (see [Security](#security)).
 
-### Data model — two DynamoDB tables
+### Data model — three DynamoDB tables
 
 **`food-tracker-items`** — composite key isolates each user's foods:
 
@@ -74,6 +77,31 @@ key.
 A lookup is a `Query` on the user's partition, so results can *never* include
 another user's items — isolation is structural, not a filter that could be
 forgotten.
+
+**`food-tracker-daily`** — composite key isolates each user's daily entries:
+
+```jsonc
+{
+  "userId": "usr_9f2c1a",
+  "dayOrder": "2026-07-15#0001",
+  "day": "2026-07-15",
+  "order": 1,
+  "item": "Apple",
+  "calories": 95,
+  "proteinG": 0,
+  "fatG": 0,
+  "carbsG": 25,
+  "cumulativeCalories": 95,
+  "cumulativeProteinG": 0,
+  "cumulativeFatG": 0,
+  "cumulativeCarbsG": 25,
+  "serving": "1 medium"
+}
+```
+
+The daily tracker stores the order and cumulative totals for each item logged on
+that Central Time day. If an item is removed with `delete_daily_entry`, later
+entries are renumbered and the remaining cumulative totals are recomputed.
 
 **`food-tracker-users`** — maps an API key to a user:
 
