@@ -46,6 +46,20 @@ export class FoodTrackerStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN, // don't lock everyone out on `cdk destroy`
     });
 
+    // --- Storage: daily tracker ----------------------------------------
+    // Composite key isolates each user's daily entries in their own partition:
+    //   partition = userId, sort = dayOrder (day + padded item order).
+    // The query for the latest item uses begins_with(day) to get today's last entry.
+    const dailyTable = new dynamodb.Table(this, "DailyTrackerTable", {
+      tableName: "food-tracker-daily",
+      partitionKey: { name: "userId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "dayOrder", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PROVISIONED,
+      readCapacity: 5,
+      writeCapacity: 5,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
     // --- Compute --------------------------------------------------------
     const mcpFn = new NodejsFunction(this, "McpServerFunction", {
       entry: path.join(import.meta.dirname, "../lambda/mcp-server/index.ts"),
@@ -56,6 +70,7 @@ export class FoodTrackerStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(15),
       environment: {
         TABLE_NAME: itemsTable.tableName,
+        DAILY_TABLE_NAME: dailyTable.tableName,
         USERS_TABLE_NAME: usersTable.tableName,
       },
       bundling: {
@@ -73,6 +88,7 @@ export class FoodTrackerStack extends cdk.Stack {
     //           never be able to mint or alter keys; that's an admin-only op
     //           (scripts/manage-users.ts, run with your deploy credentials).
     itemsTable.grant(mcpFn, "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Query");
+    dailyTable.grant(mcpFn, "dynamodb:PutItem", "dynamodb:Query");
     usersTable.grant(mcpFn, "dynamodb:GetItem");
 
     // --- Public HTTPS endpoint ------------------------------------------

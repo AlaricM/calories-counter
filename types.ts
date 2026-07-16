@@ -20,6 +20,33 @@ export type AddFoodItemInput = {
     serving?: string;
 }
 
+export type AddFoodToDailyCountInput = {
+    query: string;
+    quantity?: number;
+    serving?: string;
+}
+
+export type ListDailyEntriesInput = {
+    day?: string;
+}
+
+export type DailyTrackerEntry = {
+    userId: string;
+    dayOrder: string;
+    day: string;
+    order: number;
+    item: string;
+    calories: number;
+    proteinG: number;
+    fatG: number;
+    carbsG: number;
+    cumulativeCalories: number;
+    cumulativeProteinG: number;
+    cumulativeFatG: number;
+    cumulativeCarbsG: number;
+    serving?: string;
+}
+
 export type AddAliasInput = {
     food: string;
     alias: string;

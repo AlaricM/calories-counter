@@ -6,15 +6,43 @@ import {
   QueryCommand,
   DeleteCommand,
 } from "@aws-sdk/lib-dynamodb";
-import type { AddFoodItemInput, FoodItem } from "../../types";
+import type { AddFoodItemInput, DailyTrackerEntry, FoodItem } from "../../types";
 
 const client = new DynamoDBClient({});
 const doc = DynamoDBDocumentClient.from(client);
 const TABLE_NAME = process.env.TABLE_NAME!;
+const DAILY_TABLE_NAME = process.env.DAILY_TABLE_NAME!;
 
 /** Normalize a name into the table's sort key: trimmed + lowercased. */
 function toKey(name: string): string {
   return name.trim().toLowerCase();
+}
+
+function getCentralDateKey(date = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+
+  const year = parts.find((part) => part.type === "year")?.value;
+  const month = parts.find((part) => part.type === "month")?.value;
+  const day = parts.find((part) => part.type === "day")?.value;
+
+  if (!year || !month || !day) {
+    throw new Error("Unable to determine Central Time date.");
+  }
+
+  return `${year}-${month}-${day}`;
+}
+
+function toDailySortKey(day: string, order: number): string {
+  return `${day}#${order.toString().padStart(4, "0")}`;
+}
+
+function safeNumber(value: number | undefined): number {
+  return value ?? 0;
 }
 
 /** Lowercase, trim, drop empties, and de-duplicate a list of aliases. */
@@ -131,4 +159,80 @@ export async function findFoodItem(
   return ((result.Items as FoodItem[]) ?? [])
     .filter((item) => matchesQuery(item, key))
     .slice(0, limit);
+}
+
+export async function addFoodToDailyCount(
+  userId: string,
+  query: string,
+  quantity = 1,
+  serving?: string
+): Promise<DailyTrackerEntry> {
+  if (quantity <= 0) {
+    throw new Error("Quantity must be greater than zero.");
+  }
+
+  const matched = await findFoodItem(userId, query, 1);
+  if (matched.length === 0) {
+    throw new Error(`No saved food found matching "${query}". Add it with add_food_item first.`);
+  }
+
+  const food = matched[0];
+  const day = getCentralDateKey();
+  const latest = await doc.send(
+    new QueryCommand({
+      TableName: DAILY_TABLE_NAME,
+      KeyConditionExpression: "#u = :u AND begins_with(#k, :day)",
+      ExpressionAttributeNames: { "#u": "userId", "#k": "dayOrder" },
+      ExpressionAttributeValues: { ":u": userId, ":day": `${day}#` },
+      ScanIndexForward: false,
+      Limit: 1,
+    })
+  );
+
+  const previous = (latest.Items as DailyTrackerEntry[] | undefined)?.[0];
+  const order = (previous?.order ?? 0) + 1;
+  const itemCalories = food.calories * quantity;
+  const itemProteinG = safeNumber(food.proteinG) * quantity;
+  const itemFatG = safeNumber(food.fatG) * quantity;
+  const itemCarbsG = safeNumber(food.carbsG) * quantity;
+  const cumulativeCalories = (previous?.cumulativeCalories ?? 0) + itemCalories;
+  const cumulativeProteinG = (previous?.cumulativeProteinG ?? 0) + itemProteinG;
+  const cumulativeFatG = (previous?.cumulativeFatG ?? 0) + itemFatG;
+  const cumulativeCarbsG = (previous?.cumulativeCarbsG ?? 0) + itemCarbsG;
+
+  const record: DailyTrackerEntry = {
+    userId,
+    dayOrder: toDailySortKey(day, order),
+    day,
+    order,
+    item: food.item,
+    calories: itemCalories,
+    proteinG: itemProteinG,
+    fatG: itemFatG,
+    carbsG: itemCarbsG,
+    cumulativeCalories,
+    cumulativeProteinG,
+    cumulativeFatG,
+    cumulativeCarbsG,
+    serving: serving ?? food.serving,
+  };
+
+  await doc.send(new PutCommand({ TableName: DAILY_TABLE_NAME, Item: record }));
+  return record;
+}
+
+export async function listDailyEntries(
+  userId: string,
+  day = getCentralDateKey()
+): Promise<DailyTrackerEntry[]> {
+  const result = await doc.send(
+    new QueryCommand({
+      TableName: DAILY_TABLE_NAME,
+      KeyConditionExpression: "#u = :u AND begins_with(#k, :day)",
+      ExpressionAttributeNames: { "#u": "userId", "#k": "dayOrder" },
+      ExpressionAttributeValues: { ":u": userId, ":day": `${day}#` },
+      ScanIndexForward: true,
+    })
+  );
+  return (result.Items as DailyTrackerEntry[]) ?? [];
 }
