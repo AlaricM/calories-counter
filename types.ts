@@ -29,6 +29,10 @@ export type FindFoodItemInput = {
     query: string;
 }
 
+export type DeleteFoodItemInput = {
+    item: string;
+}
+
 export type FindFoodItemOutput = {
     items: FoodItem[];
 }

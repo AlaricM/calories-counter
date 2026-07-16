@@ -1,8 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { addAlias, addFoodItem, findFoodItem } from "./db";
+import { addAlias, addFoodItem, deleteFoodItem, findFoodItem } from "./db";
 import { SYSTEM_PROMPT } from "./system-prompt";
-import type { AddAliasInput, AddFoodItemInput, FindFoodItemInput } from "../../types";
+import type { AddAliasInput, AddFoodItemInput, DeleteFoodItemInput, FindFoodItemInput } from "../../types";
 
 const addFoodItemSchema = {
   item: z.string().describe("Name of the food item, e.g. 'cheese sticks'"),
@@ -29,6 +29,10 @@ const findFoodItemSchema = {
   query: z.string().describe("Food name to search for, e.g. 'cheese sticks'"),
 };
 
+const deleteFoodItemSchema = {
+  item: z.string().describe("Name of the food item to delete, e.g. 'cheese sticks'"),
+};
+
 /**
  * Builds a fresh MCP server + tool set for a single authenticated user. Called
  * once per request (this Lambda runs stateless — see index.ts). Every tool is
@@ -47,8 +51,8 @@ export function buildServer(userId: string): McpServer {
     "add_food_item",
     {
       description:
-        "Store a food item with its nutrition info in the personal food database. " +
-        "Use this when the user wants to add or define a new food, e.g. " +
+        "Upsert a food item with its nutrition info in the personal food database. " +
+        "Use this when the user wants to add, update, or define a new food, e.g. " +
         "'add cheese sticks, 50 cal, 6g protein, 2.5g fat'.",
       inputSchema: addFoodItemSchema,
     },
@@ -98,6 +102,24 @@ export function buildServer(userId: string): McpServer {
         };
       }
       return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+    }
+  );
+
+  server.registerTool(
+    "delete_food_item",
+    {
+      description:
+        "Delete an existing food item by canonical name. Use this when the user wants to remove a saved food from their database, e.g. 'delete cheese sticks'.",
+      inputSchema: deleteFoodItemSchema,
+    },
+    async ({ item }: DeleteFoodItemInput) => {
+      try {
+        await deleteFoodItem(userId, item);
+        return { content: [{ type: "text", text: `Deleted food item: ${item}` }] };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to delete food item.";
+        return { content: [{ type: "text", text: message }] };
+      }
     }
   );
 

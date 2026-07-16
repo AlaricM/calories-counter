@@ -26,6 +26,7 @@ it costs **~$0/month**.
 | `add_food_item` | Store a food's name + calories/macros (optional aliases, serving size) |
 | `add_alias` | Add an alternative name to an existing food |
 | `find_food_item` | Look up a saved food by name or alias (exact, then partial match) |
+| `delete_food_item` | Delete a saved food item by canonical name |
 
 Typical conversation: *"add cheese sticks, 50 cal, 6g protein, 2.5g fat"* →
 `add_food_item`. Later: *"I ate two cheese sticks, how much was that?"* →

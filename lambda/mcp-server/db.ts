@@ -4,6 +4,7 @@ import {
   PutCommand,
   GetCommand,
   QueryCommand,
+  DeleteCommand,
 } from "@aws-sdk/lib-dynamodb";
 import type { AddFoodItemInput, FoodItem } from "../../types";
 
@@ -28,11 +29,18 @@ export async function addFoodItem(
   input: AddFoodItemInput
 ): Promise<FoodItem> {
   const item = input.item.trim();
+  const existing = (await findFoodItem(userId, item, 1))[0];
+  const itemLower = existing?.itemLower ?? toKey(item);
+  const aliases = normalizeAliases([
+    ...(input.aliases ?? []),
+    ...(existing?.aliases ?? []),
+  ]);
+
   const record: FoodItem = {
     userId, // partition key — isolates each user's foods in their own partition
-    itemLower: toKey(item), // sort key
+    itemLower,
     item, // human-readable name, original casing preserved for display
-    aliases: normalizeAliases(input.aliases),
+    aliases,
     calories: input.calories,
     ...(input.proteinG !== undefined && { proteinG: input.proteinG }),
     ...(input.fatG !== undefined && { fatG: input.fatG }),
@@ -42,6 +50,24 @@ export async function addFoodItem(
 
   await doc.send(new PutCommand({ TableName: TABLE_NAME, Item: record }));
   return record;
+}
+
+export async function deleteFoodItem(
+  userId: string,
+  item: string
+): Promise<void> {
+  const itemLower = toKey(item);
+  const existing = await doc.send(
+    new GetCommand({ TableName: TABLE_NAME, Key: { userId, itemLower } })
+  );
+
+  if (!existing.Item) {
+    throw new Error(`Food item not found: ${item}`);
+  }
+
+  await doc.send(
+    new DeleteCommand({ TableName: TABLE_NAME, Key: { userId, itemLower } })
+  );
 }
 
 export async function addAlias(
