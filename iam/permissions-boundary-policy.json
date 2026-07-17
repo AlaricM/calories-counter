@@ -1,0 +1,42 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "LambdaLogging",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": [
+        "arn:aws:logs:us-east-1:<ACCOUNT_ID>:log-group:/aws/lambda/FoodTrackerMcpStack-*",
+        "arn:aws:logs:us-east-1:<ACCOUNT_ID>:log-group:/aws/lambda/FoodTrackerMcpStack-*:*"
+      ]
+    },
+    {
+      "Sid": "AppDynamoAccess",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:Query",
+        "dynamodb:DeleteItem"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:us-east-1:<ACCOUNT_ID>:table/food-tracker-items",
+        "arn:aws:dynamodb:us-east-1:<ACCOUNT_ID>:table/food-tracker-daily",
+        "arn:aws:dynamodb:us-east-1:<ACCOUNT_ID>:table/food-tracker-users"
+      ]
+    },
+    {
+      "Sid": "BudgetKillSwitchAttach",
+      "Effect": "Allow",
+      "Action": [
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/FoodTrackerMcpStack-*"
+    }
+  ]
+}
