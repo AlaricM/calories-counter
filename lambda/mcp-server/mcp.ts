@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { addAlias, addFoodItem, addFoodToDailyCount, deleteDailyEntry, deleteFoodItem, findFoodItem, listDailyEntries } from "./db";
+import { addAlias, addFoodItem, addFoodToDailyCount, deleteDailyEntry, deleteFoodItem, findFoodItem, findFoodItemFuzzy, listDailyEntries } from "./db";
 import { SYSTEM_PROMPT } from "./system-prompt";
 import type {
   AddAliasInput,
@@ -99,17 +99,37 @@ export function buildServer(userId: string): McpServer {
     {
       description:
         "Look up a previously saved food item's nutrition info by name or alias. " +
-        "Supports exact and partial matches, e.g. 'I ate one cheese stick'.",
+        "Supports exact and partial matches, e.g. 'I ate one cheese stick'. " +
+        "If nothing matches exactly, falls back to fuzzy suggestions ranked by " +
+        "similarity — confirm with the user before treating a fuzzy suggestion as the item they meant.",
       inputSchema: findFoodItemSchema,
     },
     async ({ query }: FindFoodItemInput) => {
       const results = await findFoodItem(userId, query);
-      if (results.length === 0) {
+      if (results.length > 0) {
+        return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+      }
+
+      const fuzzyMatches = await findFoodItemFuzzy(userId, query);
+      if (fuzzyMatches.length === 0) {
         return {
           content: [{ type: "text", text: `No food item found matching "${query}".` }],
         };
       }
-      return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `No exact match for "${query}". Closest saved items (not confirmed — check with the user before logging):\n` +
+              JSON.stringify(
+                fuzzyMatches.map(({ item, similarityPercent }) => ({ ...item, similarityPercent })),
+                null,
+                2
+              ),
+          },
+        ],
+      };
     }
   );
 

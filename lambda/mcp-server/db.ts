@@ -129,6 +129,19 @@ function matchesQuery(item: FoodItem, query: string): boolean {
   return (item.aliases ?? []).some((alias) => alias.includes(query));
 }
 
+async function queryUserItems(userId: string, limit = 200): Promise<FoodItem[]> {
+  const result = await doc.send(
+    new QueryCommand({
+      TableName: TABLE_NAME,
+      KeyConditionExpression: "#u = :u",
+      ExpressionAttributeNames: { "#u": "userId" },
+      ExpressionAttributeValues: { ":u": userId },
+      Limit: limit,
+    })
+  );
+  return (result.Items as FoodItem[]) ?? [];
+}
+
 /**
  * Look up one user's food by exact sort-key match first (cheap GetItem), then
  * fall back to a Query over just that user's partition + substring match. The
@@ -147,18 +160,76 @@ export async function findFoodItem(
   );
   if (exact.Item) return [exact.Item as FoodItem];
 
-  const result = await doc.send(
-    new QueryCommand({
-      TableName: TABLE_NAME,
-      KeyConditionExpression: "#u = :u",
-      ExpressionAttributeNames: { "#u": "userId" },
-      ExpressionAttributeValues: { ":u": userId },
-      Limit: 200,
-    })
-  );
-  return ((result.Items as FoodItem[]) ?? [])
-    .filter((item) => matchesQuery(item, key))
-    .slice(0, limit);
+  const items = await queryUserItems(userId);
+  return items.filter((item) => matchesQuery(item, key)).slice(0, limit);
+}
+
+const FUZZY_MAX_DISTANCE = 0.5;
+const FUZZY_MAX_RESULTS = 3;
+
+/** Levenshtein edit distance between two strings. */
+function levenshtein(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1, // deletion
+        dp[i][j - 1] + 1, // insertion
+        dp[i - 1][j - 1] + cost // substitution
+      );
+    }
+  }
+  return dp[m][n];
+}
+
+/** Edit distance normalized to [0, 1] by the longer string's length; 0 = identical. */
+function normalizedDistance(a: string, b: string): number {
+  if (!a.length && !b.length) return 0;
+  return levenshtein(a, b) / Math.max(a.length, b.length);
+}
+
+/** Closest distance from `query` to an item's canonical name or any of its aliases. */
+function bestDistance(item: FoodItem, query: string): number {
+  const candidates = [item.itemLower, ...(item.aliases ?? [])];
+  return Math.min(...candidates.map((candidate) => normalizedDistance(candidate, query)));
+}
+
+export type FuzzyFoodMatch = {
+  item: FoodItem;
+  similarityPercent: number;
+};
+
+/**
+ * Fuzzy fallback for when exact/substring matching in `findFoodItem` comes up
+ * empty — e.g. the LLM guesses "7% ground beef patties" but the saved alias is
+ * "7 ground beef patty". Ranks the whole partition by edit distance to the
+ * canonical name or any alias, keeps matches under 50% distance, and returns
+ * the closest 3. Intentionally separate from `findFoodItem` (rather than a
+ * flag on it) so callers that act on a match automatically — upserting in
+ * `addFoodItem`, auto-logging in `addFoodToDailyCount` — can't silently pick up
+ * a "close enough" guess instead of a real one.
+ */
+export async function findFoodItemFuzzy(
+  userId: string,
+  query: string
+): Promise<FuzzyFoodMatch[]> {
+  const key = toKey(query);
+  const items = await queryUserItems(userId);
+
+  return items
+    .map((item) => ({ item, distance: bestDistance(item, key) }))
+    .filter(({ distance }) => distance < FUZZY_MAX_DISTANCE)
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, FUZZY_MAX_RESULTS)
+    .map(({ item, distance }) => ({
+      item,
+      similarityPercent: Math.round((1 - distance) * 100),
+    }));
 }
 
 export async function addFoodToDailyCount(
