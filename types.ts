@@ -23,6 +23,7 @@ export type AddFoodItemInput = {
 export type AddFoodToDailyCountInput = {
     query: string;
     quantity?: number;
+    amountEaten?: string;
     serving?: string;
 }
 

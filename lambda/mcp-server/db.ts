@@ -7,6 +7,7 @@ import {
   DeleteCommand,
 } from "@aws-sdk/lib-dynamodb";
 import type { AddFoodItemInput, DailyTrackerEntry, FoodItem } from "../../types";
+import { computeQuantityFromAmounts } from "./units";
 
 const client = new DynamoDBClient({});
 const doc = DynamoDBDocumentClient.from(client);
@@ -236,18 +237,40 @@ export async function addFoodToDailyCount(
   userId: string,
   query: string,
   quantity = 1,
-  serving?: string
+  serving?: string,
+  amountEaten?: string
 ): Promise<DailyTrackerEntry> {
-  if (quantity <= 0) {
-    throw new Error("Quantity must be greater than zero.");
-  }
-
   const matched = await findFoodItem(userId, query, 1);
   if (matched.length === 0) {
     throw new Error(`No saved food found matching "${query}". Add it with add_food_item first.`);
   }
 
   const food = matched[0];
+
+  // Prefer computing the multiplier ourselves from the stated amount rather
+  // than trusting an LLM-supplied `quantity` — dividing "2oz eaten" by a
+  // saved "1oz" serving is exactly the kind of arithmetic weaker models get
+  // wrong or skip.
+  let effectiveQuantity = quantity;
+  if (amountEaten) {
+    if (!food.serving) {
+      throw new Error(
+        `"${food.item}" has no saved serving size, so "${amountEaten}" can't be converted to a quantity. Pass "quantity" as a plain number of servings instead.`
+      );
+    }
+    const computed = computeQuantityFromAmounts(food.serving, amountEaten);
+    if (computed === null) {
+      throw new Error(
+        `Could not reconcile "${amountEaten}" with the saved serving "${food.serving}" for "${food.item}". State the amount using the same or a convertible unit (e.g. both mass like g/oz/lb, or both volume like ml/tsp/tbsp/cup), or pass "quantity" as a plain number of servings instead.`
+      );
+    }
+    effectiveQuantity = computed;
+  }
+
+  if (effectiveQuantity <= 0) {
+    throw new Error("Quantity must be greater than zero.");
+  }
+
   const day = getCentralDateKey();
   const latest = await doc.send(
     new QueryCommand({
@@ -262,10 +285,10 @@ export async function addFoodToDailyCount(
 
   const previous = (latest.Items as DailyTrackerEntry[] | undefined)?.[0];
   const order = (previous?.order ?? 0) + 1;
-  const itemCalories = food.calories * quantity;
-  const itemProteinG = safeNumber(food.proteinG) * quantity;
-  const itemFatG = safeNumber(food.fatG) * quantity;
-  const itemCarbsG = safeNumber(food.carbsG) * quantity;
+  const itemCalories = food.calories * effectiveQuantity;
+  const itemProteinG = safeNumber(food.proteinG) * effectiveQuantity;
+  const itemFatG = safeNumber(food.fatG) * effectiveQuantity;
+  const itemCarbsG = safeNumber(food.carbsG) * effectiveQuantity;
   const cumulativeCalories = (previous?.cumulativeCalories ?? 0) + itemCalories;
   const cumulativeProteinG = (previous?.cumulativeProteinG ?? 0) + itemProteinG;
   const cumulativeFatG = (previous?.cumulativeFatG ?? 0) + itemFatG;

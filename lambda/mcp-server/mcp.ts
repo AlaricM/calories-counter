@@ -175,13 +175,22 @@ export function buildServer(userId: string): McpServer {
     "add_food_to_daily_count",
     {
       description:
-        "Log a known food item into today's running daily totals. Use this when the user says something like 'I ate an apple today' or 'I just ate an apple'. The tool appends the item to today's tracker and updates cumulative calories and macros for the day.",
+        "Log a known food item into today's running daily totals. Use this when the user says something like 'I ate an apple today' or 'I just ate an apple'. The tool appends the item to today's tracker and updates cumulative calories and macros for the day. " +
+        "IMPORTANT: whenever the user states a specific amount (a weight, volume, or count — '2oz', '1/2 cup', '2/3 lb', '3 sticks'), pass it verbatim as `amountEaten` and do NOT compute a `quantity` yourself — the server converts it against the food's saved serving size for you. Only pass a plain `quantity` (number of servings) when the user gives a serving count with no amount, e.g. 'two servings' or 'I had it twice'.",
       inputSchema: {
         query: z.string().describe("Food name or alias to find in the saved food database."),
+        amountEaten: z
+          .string()
+          .optional()
+          .describe(
+            "The amount actually eaten, verbatim from the user, e.g. '2oz', '1/2 cup', '2/3 lb', '150g', '3 sticks'. Preferred over quantity: the server computes the serving multiplier itself against the food's saved serving size, so do not do that division yourself."
+          ),
         quantity: z
           .number()
           .optional()
-          .describe("Number of servings eaten. Defaults to 1 if not provided."),
+          .describe(
+            "Number of servings eaten, only when the user did not state a specific amount (defaults to 1). Ignored if amountEaten is provided."
+          ),
         serving: z
           .string()
           .optional()
@@ -190,7 +199,13 @@ export function buildServer(userId: string): McpServer {
     },
     async (args: AddFoodToDailyCountInput) => {
       try {
-        const record = await addFoodToDailyCount(userId, args.query, args.quantity, args.serving);
+        const record = await addFoodToDailyCount(
+          userId,
+          args.query,
+          args.quantity,
+          args.serving,
+          args.amountEaten
+        );
         return {
           content: [
             {
