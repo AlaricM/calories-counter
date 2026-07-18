@@ -32,8 +32,10 @@ it costs **~$0/month**.
 | `delete_food_item` | Delete a saved food item by canonical name |
 
 Typical conversation: *"add cheese sticks, 50 cal, 6g protein, 2.5g fat"* →
-`add_food_item`. Later: *"I ate two cheese sticks, how much was that?"* →
-`find_food_item` → the model multiplies and answers. When the user says *"I ate an apple today"* the model should use `add_food_to_daily_count`, and when the user wants a summary it should use `list_daily_entries`.
+`add_food_item`. Later: *"I ate 6oz of chicken today"* → `add_food_to_daily_count`
+with `amountEaten: "6oz"` — the server divides that by the food's saved serving
+size to get the multiplier, so the model never has to do the arithmetic. When the
+user wants a summary the model uses `list_daily_entries`.
 
 ## How it works
 
@@ -70,9 +72,15 @@ key.
   "aliases":   ["160 cal greek yogurt"],  // normalized, de-duplicated
   "calories":  160,
   "proteinG":  17, "fatG": 0, "carbsG": 9,   // all optional
-  "serving":   "1 container (170g)"          // optional
+  "serving":   { "quantity": 6, "unit": "oz" } // optional; oz (weight) or floz (volume)
 }
 ```
+
+Serving is stored as a structured weight (`oz`) or volume (`floz`), never freeform
+text, so an amount the user later reports (also converted to oz/floz) can be
+reconciled against it deterministically — the server divides "6oz eaten" by a
+saved "2oz" serving to get the multiplier, instead of trusting a weak model's
+mental arithmetic (see [`lambda/mcp-server/units.ts`](lambda/mcp-server/units.ts)).
 
 A lookup is a `Query` on the user's partition, so results can *never* include
 another user's items — isolation is structural, not a filter that could be
@@ -95,7 +103,7 @@ forgotten.
   "cumulativeProteinG": 0,
   "cumulativeFatG": 0,
   "cumulativeCarbsG": 25,
-  "serving": "1 medium"
+  "serving": { "quantity": 6, "unit": "oz" }
 }
 ```
 

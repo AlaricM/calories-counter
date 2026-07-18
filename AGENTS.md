@@ -7,9 +7,10 @@ breaking things.
 ## What this is
 
 A **remote MCP server** that is the long-term memory for a personal calorie/macro
-tracker. A cheap LLM (via the Joey MCP client + OpenRouter) calls three tools to
-store and recall foods in DynamoDB, so the user never re-specifies a food's
-nutrition twice. The LLM is meant to be *dumb*; correctness lives in the database.
+tracker. A cheap LLM (via the Joey MCP client + OpenRouter) calls a handful of
+tools to store and recall foods in DynamoDB, so the user never re-specifies a
+food's nutrition twice. The LLM is meant to be *dumb*; correctness lives in the
+database — including serving-multiplier arithmetic (see units note below).
 Deployed to a personal AWS account with the CDK, sized to stay in AWS's permanent
 free tier.
 
@@ -46,6 +47,7 @@ Joey → HTTPS POST /mcp (+ user's API key) → Lambda Function URL → Express
 | `lambda/mcp-server/mcp.ts` | Tool definitions | `buildServer(userId)`; Zod schemas; thin wrappers over `db.ts`; wires the system prompt. |
 | `lambda/mcp-server/system-prompt.ts` | The always-on counter persona | Single source of truth; shipped as server `instructions` + the `counter_context` prompt. Edit daily targets here. |
 | `lambda/mcp-server/db.ts` | Food-item helpers | `addFoodItem`/`addAlias`/`findFoodItem`/`addFoodToDailyCount`/`listDailyEntries`/`deleteDailyEntry`, all `(userId, …)`. Normalization and daily tracker logic live here. |
+| `lambda/mcp-server/units.ts` | Amount → serving-multiplier math | `computeQuantityFromServing(serving, amountEaten)` divides an oz/floz amount by the saved oz/floz serving; refuses on a unit mismatch. The LLM converts to oz/floz; the server only divides. |
 | `lambda/mcp-server/users.ts` | Auth lookup | `resolveUser(apiKey)` → reads users table by key hash. |
 | `lambda/mcp-server/hash.ts` | `hashApiKey()` | SHA-256; **shared** with the admin CLI so both hash identically. |
 | `types.ts` | Shared types | `FoodItem`, `UserRecord`, tool I/O. |
@@ -62,7 +64,7 @@ Joey → HTTPS POST /mcp (+ user's API key) → Lambda Function URL → Express
   "item": "Greek yogurt",       // display name, original casing
   "aliases": ["..."],           // normalized + de-duplicated
   "calories": 160, "proteinG": 17, "fatG": 0, "carbsG": 9,  // macros optional
-  "serving": "1 container" }    // optional
+  "serving": { "quantity": 6, "unit": "oz" } }  // optional; oz (weight) or floz (volume)
 ```
 
 **`food-tracker-users`** — partition `apiKeyHash` → `{ userId, name, createdAt }`.
@@ -85,7 +87,7 @@ Only the SHA-256 **hash** of the key is stored.
   "cumulativeProteinG": 0,
   "cumulativeFatG": 0,
   "cumulativeCarbsG": 25,
-  "serving": "1 medium"
+  "serving": { "quantity": 6, "unit": "oz" }
 }
 ```
 

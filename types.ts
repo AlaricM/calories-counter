@@ -1,3 +1,11 @@
+/** Serving size stored as a precise weight (oz) or volume (floz), never freeform text. */
+export type ServingUnit = "oz" | "floz";
+
+export type ServingSize = {
+    quantity: number;
+    unit: ServingUnit;
+}
+
 export type FoodItem = {
     userId: string;
     itemLower: string;
@@ -7,7 +15,7 @@ export type FoodItem = {
     proteinG?: number;
     fatG?: number;
     carbsG?: number;
-    serving?: string;
+    serving?: ServingSize;
 }
 
 export type AddFoodItemInput = {
@@ -17,14 +25,14 @@ export type AddFoodItemInput = {
     proteinG?: number;
     fatG?: number;
     carbsG?: number;
-    serving?: string;
+    serving?: ServingSize;
 }
 
 export type AddFoodToDailyCountInput = {
     query: string;
     quantity?: number;
     amountEaten?: string;
-    serving?: string;
+    serving?: ServingSize;
 }
 
 export type ListDailyEntriesInput = {
@@ -50,7 +58,7 @@ export type DailyTrackerEntry = {
     cumulativeProteinG: number;
     cumulativeFatG: number;
     cumulativeCarbsG: number;
-    serving?: string;
+    serving?: ServingSize;
 }
 
 export type AddAliasInput = {

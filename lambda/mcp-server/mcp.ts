@@ -12,6 +12,30 @@ import type {
   ListDailyEntriesInput,
 } from "../../types";
 
+// Serving is expressed as a precise weight (oz) or volume (floz) rather than
+// freeform text, so it can be reconciled deterministically against whatever
+// amount the user later says they ate (see units.ts). Optional — some foods
+// (e.g. always counted in discrete pieces) genuinely have no such serving —
+// but the description leans hard on the model to convert and provide one
+// whenever the food has a meaningful weight/volume, since that's what makes
+// add_food_to_daily_count's amountEaten conversion possible later.
+const servingSchema = z
+  .object({
+    quantity: z.number().positive().describe("Numeric size of one serving, e.g. 8"),
+    unit: z
+      .enum(["oz", "floz"])
+      .describe("'oz' for weight (solids) or 'floz' for volume (liquids)"),
+  })
+  .optional()
+  .describe(
+    "Serving size as a precise weight or volume — NOT freeform text. Always convert " +
+      "common measures yourself before calling this tool, e.g. '1/4 cup' -> { quantity: 2, " +
+      "unit: 'floz' } (1 cup = 8 floz), '1 cup' -> { quantity: 8, unit: 'floz' }, '3.5oz' -> " +
+      "{ quantity: 3.5, unit: 'oz' }, '100g' -> convert grams to oz (1oz = 28.35g). Strongly " +
+      "prefer providing this for any food with a real weight or volume; only omit it for foods " +
+      "genuinely counted in discrete pieces with no meaningful weight/volume (e.g. 'egg', 'slice')."
+  );
+
 const addFoodItemSchema = {
   item: z.string().describe("Name of the food item, e.g. 'cheese sticks'"),
   aliases: z
@@ -22,10 +46,7 @@ const addFoodItemSchema = {
   proteinG: z.number().optional().describe("Protein per serving, in grams"),
   fatG: z.number().optional().describe("Fat per serving, in grams"),
   carbsG: z.number().optional().describe("Carbohydrates per serving, in grams"),
-  serving: z
-    .string()
-    .optional()
-    .describe("Serving size description, e.g. '1 stick' or '100g'"),
+  serving: servingSchema,
 };
 
 const addAliasSchema = {
@@ -61,7 +82,10 @@ export function buildServer(userId: string): McpServer {
       description:
         "Upsert a food item with its nutrition info in the personal food database. " +
         "Use this when the user wants to add, update, or define a new food, e.g. " +
-        "'add cheese sticks, 50 cal, 6g protein, 2.5g fat'.",
+        "'add cheese sticks, 50 cal, 6g protein, 2.5g fat'. " +
+        "IMPORTANT: convert the serving size to `serving: { quantity, unit }` in oz (weight) " +
+        "or floz (volume) yourself — do not pass serving as freeform text. Provide it whenever " +
+        "the food has a real weight or volume; only skip it for foods counted in discrete pieces.",
       inputSchema: addFoodItemSchema,
     },
     async (args: AddFoodItemInput) => {
@@ -100,6 +124,7 @@ export function buildServer(userId: string): McpServer {
       description:
         "Look up a previously saved food item's nutrition info by name or alias. " +
         "Supports exact and partial matches, e.g. 'I ate one cheese stick'. " +
+        "Returns each item's `serving` as a structured { quantity, unit } in oz or floz when saved. " +
         "If nothing matches exactly, falls back to fuzzy suggestions ranked by " +
         "similarity — confirm with the user before treating a fuzzy suggestion as the item they meant.",
       inputSchema: findFoodItemSchema,
@@ -176,14 +201,14 @@ export function buildServer(userId: string): McpServer {
     {
       description:
         "Log a known food item into today's running daily totals. Use this when the user says something like 'I ate an apple today' or 'I just ate an apple'. The tool appends the item to today's tracker and updates cumulative calories and macros for the day. " +
-        "IMPORTANT: whenever the user states a specific amount (a weight, volume, or count — '2oz', '1/2 cup', '2/3 lb', '3 sticks'), pass it verbatim as `amountEaten` and do NOT compute a `quantity` yourself — the server converts it against the food's saved serving size for you. Only pass a plain `quantity` (number of servings) when the user gives a serving count with no amount, e.g. 'two servings' or 'I had it twice'.",
+        "IMPORTANT: whenever the user states a specific amount, convert it to oz (weight) or floz (volume) and pass it as `amountEaten` (e.g. '6oz', '1.5floz'); do NOT compute a `quantity` yourself — the server divides it by the food's saved serving size for you. Only pass a plain `quantity` (number of servings) when the user gives a serving count with no amount, e.g. 'two servings' or 'I had it twice'.",
       inputSchema: {
         query: z.string().describe("Food name or alias to find in the saved food database."),
         amountEaten: z
           .string()
           .optional()
           .describe(
-            "The amount actually eaten, verbatim from the user, e.g. '2oz', '1/2 cup', '2/3 lb', '150g', '3 sticks'. Preferred over quantity: the server computes the serving multiplier itself against the food's saved serving size, so do not do that division yourself."
+            "The amount actually eaten, converted to oz (weight) or floz (volume), e.g. '6oz', '1.5floz'. Preferred over quantity: the server divides it by the food's saved serving size itself, so do not do that division yourself."
           ),
         quantity: z
           .number()
@@ -191,10 +216,7 @@ export function buildServer(userId: string): McpServer {
           .describe(
             "Number of servings eaten, only when the user did not state a specific amount (defaults to 1). Ignored if amountEaten is provided."
           ),
-        serving: z
-          .string()
-          .optional()
-          .describe("Optional serving description to attach to the daily entry."),
+        serving: servingSchema,
       },
     },
     async (args: AddFoodToDailyCountInput) => {

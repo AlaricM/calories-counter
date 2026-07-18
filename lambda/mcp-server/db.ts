@@ -6,8 +6,8 @@ import {
   QueryCommand,
   DeleteCommand,
 } from "@aws-sdk/lib-dynamodb";
-import type { AddFoodItemInput, DailyTrackerEntry, FoodItem } from "../../types";
-import { computeQuantityFromAmounts } from "./units";
+import type { AddFoodItemInput, DailyTrackerEntry, FoodItem, ServingSize } from "../../types";
+import { computeQuantityFromServing, formatServing } from "./units";
 
 const client = new DynamoDBClient({});
 const doc = DynamoDBDocumentClient.from(client);
@@ -237,7 +237,7 @@ export async function addFoodToDailyCount(
   userId: string,
   query: string,
   quantity = 1,
-  serving?: string,
+  serving?: ServingSize,
   amountEaten?: string
 ): Promise<DailyTrackerEntry> {
   const matched = await findFoodItem(userId, query, 1);
@@ -248,9 +248,9 @@ export async function addFoodToDailyCount(
   const food = matched[0];
 
   // Prefer computing the multiplier ourselves from the stated amount rather
-  // than trusting an LLM-supplied `quantity` — dividing "2oz eaten" by a
-  // saved "1oz" serving is exactly the kind of arithmetic weaker models get
-  // wrong or skip.
+  // than trusting an LLM-supplied `quantity` — dividing "6oz eaten" by a
+  // saved "2oz" serving is exactly the kind of arithmetic weaker models get
+  // wrong or skip. The LLM converts the amount to oz/floz first; we only divide.
   let effectiveQuantity = quantity;
   if (amountEaten) {
     if (!food.serving) {
@@ -258,10 +258,10 @@ export async function addFoodToDailyCount(
         `"${food.item}" has no saved serving size, so "${amountEaten}" can't be converted to a quantity. Pass "quantity" as a plain number of servings instead.`
       );
     }
-    const computed = computeQuantityFromAmounts(food.serving, amountEaten);
+    const computed = computeQuantityFromServing(food.serving, amountEaten);
     if (computed === null) {
       throw new Error(
-        `Could not reconcile "${amountEaten}" with the saved serving "${food.serving}" for "${food.item}". State the amount using the same or a convertible unit (e.g. both mass like g/oz/lb, or both volume like ml/tsp/tbsp/cup), or pass "quantity" as a plain number of servings instead.`
+        `Could not reconcile "${amountEaten}" with the saved serving "${formatServing(food.serving)}" for "${food.item}". State the amount in ${food.serving.unit} (${food.serving.unit === "oz" ? "weight" : "volume"}), or pass "quantity" as a plain number of servings instead.`
       );
     }
     effectiveQuantity = computed;
