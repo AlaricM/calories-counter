@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# bootstrap.sh — one-shot local setup + deploy for food-tracker-mcp (macOS).
+# bootstrap.sh — one-shot local setup + deploy for the calorie-tracker app (macOS).
 #
 # This automates everything that CAN be automated. You must do these MANUAL
 # steps first (they can't be scripted — see the README "From scratch" section):
@@ -8,15 +8,17 @@
 #   1. Create an AWS account            (https://portal.aws.amazon.com/billing/signup)
 #   2. Create a non-root IAM admin user with MFA + access keys
 #   3. Run `aws configure` (or `aws configure sso`) so the CLI has credentials
+#   4. Put your OpenAI API key in .env as OPENAI_API_KEY=... (this script creates
+#      .env from the template and reminds you if it's still blank)
 #
 # Then run:   ./scripts/bootstrap.sh
 #
 # What it does, each step idempotent and safe to re-run:
 #   - installs Homebrew, Node (>=20, via nvm if missing), and the AWS CLI if missing
-#   - installs project dependencies (npm ci)
+#   - installs project dependencies (npm ci) and builds the React web app
 #   - runs `cdk bootstrap` (first deploy per account/region only) and `cdk deploy`
 #   - creates your first user + API key and prints it (skipped if one exists)
-#   - shows the URL + Bearer header to paste into Joey
+#   - shows the SiteUrl to open and the key to paste into the app's Settings
 #
 set -euo pipefail
 
@@ -123,33 +125,39 @@ else
   printf '%s\n' "${LOCK_SHA}" > "${LOCK_MARKER}"
 fi
 
-# --- 6. Optional config (.env) ----------------------------------------------
-# Deploys no longer need a shared secret — auth is per-user, stored in DynamoDB.
-# .env is optional and only carries the cost-alert settings.
+# --- 6. Config (.env) --------------------------------------------------------
+# The one required setting is OPENAI_API_KEY (the chat backend calls OpenAI).
+# Per-user auth is stored (hashed) in DynamoDB, so no shared secret is needed.
 if [[ ! -f .env ]]; then
-  say "Creating .env from .env.example (optional cost-alert settings)"
+  say "Creating .env from .env.example"
   cp .env.example .env
 fi
-warn "Optional: set ALERT_EMAIL in .env for AWS cost alerts, then re-run 'npx cdk deploy'."
+if ! grep -Eq '^OPENAI_API_KEY=.+' .env 2>/dev/null; then
+  warn "OPENAI_API_KEY is blank in .env — set it now, then re-run this script (or 'npm run deploy'). The app deploys but won't answer until it's set."
+fi
+warn "Optional: set ALERT_EMAIL in .env for AWS cost alerts."
 
-# --- 7. Bootstrap + deploy ---------------------------------------------------
+# --- 7. Build + bootstrap + deploy -------------------------------------------
 say "Bootstrapping CDK (no-op if already bootstrapped)"
 npx cdk bootstrap "aws://${ACCOUNT_ID}/${REGION}"
+
+say "Building the React web app (web/dist)"
+npm run build:web
 
 say "Deploying the stack (a no-op if nothing changed)"
 npx cdk deploy --require-approval never
 
-# Read the endpoint back from CloudFormation — reliable even on a no-change
+# Read the site URL back from CloudFormation — reliable even on a no-change
 # deploy, which may not write deploy outputs.
-MCP_URL="$(aws cloudformation describe-stacks --stack-name FoodTrackerMcpStack \
-  --query "Stacks[0].Outputs[?OutputKey=='McpServerUrl'].OutputValue" \
+SITE_URL="$(aws cloudformation describe-stacks --stack-name FoodTrackerMcpStack \
+  --query "Stacks[0].Outputs[?OutputKey=='SiteUrl'].OutputValue" \
   --output text 2>/dev/null || true)"
-if [[ "${MCP_URL}" == "None" ]]; then MCP_URL=""; fi
+if [[ "${SITE_URL}" == "None" ]]; then SITE_URL=""; fi
 
 # --- 8. First user -----------------------------------------------------------
 # Create your own user + API key. Idempotent: skipped if any user already exists.
 say "Creating your first user (skipped if one already exists)"
-npm run user -- add --name "$(id -un)" --url "${MCP_URL}" --only-if-empty
+npm run user -- add --name "$(id -un)" --url "${SITE_URL}" --only-if-empty
 
-say "Done. If a key was printed above, paste the URL + 'Authorization: Bearer <key>' into Joey."
-say "Add a friend anytime:  npm run user -- add --name \"Their Name\" --url ${MCP_URL}"
+say "Done. Open ${SITE_URL:-the SiteUrl above}, click ⚙︎ Settings, and paste the API key printed above."
+say "Add a friend anytime:  npm run user -- add --name \"Their Name\" --url ${SITE_URL}"

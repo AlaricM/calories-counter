@@ -6,184 +6,129 @@ breaking things.
 
 ## What this is
 
-A **remote MCP server** that is the long-term memory for a personal calorie/macro
-tracker. A cheap LLM (via the Joey MCP client + OpenRouter) calls a handful of
-tools to store and recall foods in DynamoDB, so the user never re-specifies a
-food's nutrition twice. The LLM is meant to be *dumb*; correctness lives in the
-database — including serving-multiplier arithmetic (see units note below).
-Deployed to a personal AWS account with the CDK, sized to stay in AWS's permanent
-free tier.
+An **AI calorie/macro tracker web app** in a personal AWS account:
 
-**Multi-tenant: one API key = one user.** Each user's data is isolated in its own
-DynamoDB partition. The server contains **no LLM logic and no OpenRouter key** — it
-only implements the tools and per-user auth. The client (Joey) runs the agentic loop.
+- **React + Vite + Tailwind SPA** (`web/`) on S3 + CloudFront — a streaming chat UI.
+- **A streaming Lambda backend** (`lambda/chat`) that holds the system prompt and
+  runs the agentic loop against **OpenAI `gpt-5-nano`**, calling tools in-process.
+- **Tools** (`lambda/shared/tools.ts`) backed by DynamoDB plus an internet
+  **nutrition search** (`lambda/shared/nutrition-search.ts`) that web-searches
+  facts for common foods and returns them in our per-oz/floz storage shape.
+
+The model is meant to be *dumb*; correctness lives in the database and in
+deterministic serving-size math (`units.ts`). **One API key = one user**, isolated
+in its own DynamoDB partition.
+
+> This was previously a remote MCP server driven by an external client (Joey +
+> OpenRouter). That is **gone** — there is no MCP transport, no `@modelcontextprotocol/sdk`,
+> no Express, no OpenRouter. The app now owns the model and the loop end-to-end.
 
 ## Architecture / data flow
 
 ```
-Joey (orchestrator) → OpenRouter (LLM) → decides to call a tool
-Joey → HTTPS POST /mcp (+ user's API key) → Lambda Function URL → Express
-     → authenticate (key → userId) → MCP transport → tool(userId, …) → DynamoDB
+Browser (React SPA) → POST /{messages} + Bearer key → Chat Lambda (Function URL, RESPONSE_STREAM)
+  → resolveUser(key) → userId
+  → agentic loop: streamChatCompletion(messages, tools)  [OpenAI gpt-5-nano]
+       ├─ text deltas  → streamed to the browser as SSE
+       └─ tool_calls   → dispatch(userId, name, args)  → DynamoDB / web-search
+  → SSE: {type:"delta"|"tool"|"error"|"done"}
 ```
 
-- **Auth per request.** `authenticate` (in `index.ts`) extracts the key (Bearer
-  header *or* `/mcp/:token` path), hashes it, looks it up in the users table, and
-  stashes `res.locals.userId`. Unknown key → 403, missing → 401.
-- **Everything is userId-scoped.** `buildServer(userId)` binds the tools; every
-  `db.ts` call takes `userId` first. This is the core invariant — see below.
-- **Stateless MCP.** A fresh `McpServer` + transport per request
-  (`sessionIdGenerator: undefined`). Don't add in-memory state expecting it to
-  persist across Lambda invocations.
-- **Function URL, not API Gateway.** IAM auth is `NONE` on purpose; the per-user
-  API key is the gate. There is no longer any shared `MCP_API_KEY`.
+- **Stateless backend.** The browser sends the full conversation each turn;
+  durable state (foods, daily log) lives in DynamoDB. Don't add in-memory state
+  expecting it to persist across invocations.
+- **Streaming.** The chat handler uses `awslambda.streamifyResponse` on a Function
+  URL with `InvokeMode.RESPONSE_STREAM`. It is **not** Express — it parses the
+  Function-URL event itself. Auth happens *before* the 200 stream opens so failures
+  can return 401/403 (see `writeError`).
+- **In-process tools.** No network hop for tools; `dispatch()` calls the handler
+  directly. `search_nutrition_facts` is the one tool that itself calls OpenAI
+  (Responses API + `web_search`).
 
 ## File map
 
 | File | Role | Notes when editing |
 |------|------|--------------------|
-| `bin/iac.ts` | CDK app entry | Loads `.env` for optional `ALERT_EMAIL`/`MONTHLY_BUDGET_USD`. No secret needed to deploy. |
-| `lib/food-tracker-stack.ts` | The whole stack | 2 tables, Lambda, Function URL, per-table IAM grants, Budgets alarm, one CfnOutput. |
-| `lambda/mcp-server/index.ts` | HTTP handler | Express + `serverless-http`; async `authenticate`; routes `/mcp` and `/mcp/:token`. |
-| `lambda/mcp-server/mcp.ts` | Tool definitions | `buildServer(userId)`; Zod schemas; thin wrappers over `db.ts`; wires the system prompt. |
-| `lambda/mcp-server/system-prompt.ts` | The always-on counter persona | Single source of truth; shipped as server `instructions` + the `counter_context` prompt. Edit daily targets here. |
-| `lambda/mcp-server/db.ts` | Food-item helpers | `addFoodItem`/`addAlias`/`findFoodItem`/`addFoodToDailyCount`/`listDailyEntries`/`deleteDailyEntry`, all `(userId, …)`. Normalization and daily tracker logic live here. |
-| `lambda/mcp-server/units.ts` | Amount → serving-multiplier math | `computeQuantityFromServing(serving, amountEaten)` divides an oz/floz amount by the saved oz/floz serving; refuses on a unit mismatch. The LLM converts to oz/floz; the server only divides. |
-| `lambda/mcp-server/users.ts` | Auth lookup | `resolveUser(apiKey)` → reads users table by key hash. |
-| `lambda/mcp-server/hash.ts` | `hashApiKey()` | SHA-256; **shared** with the admin CLI so both hash identically. |
+| `bin/iac.ts` | CDK app entry | Reads `.env`: `OPENAI_API_KEY` (required), `ALERT_EMAIL`, `MONTHLY_BUDGET_USD`. |
+| `lib/food-tracker-stack.ts` | The whole stack | 3 tables, chat Lambda + streaming URL, S3+CloudFront site, `BucketDeployment`, budget/kill-switch. Stack id stays `FoodTrackerMcpStack`. |
+| `lambda/chat/index.ts` | Streaming orchestrator | `awslambda.streamifyResponse`; auth → OpenAI loop → SSE. `MAX_TURNS`/`MAX_HISTORY` guard rails. |
+| `lambda/chat/awslambda.d.ts` | Ambient types | Declares the runtime-provided `awslambda` globals. **Force-tracked** despite `.gitignore`'s `*.d.ts`. |
+| `lambda/shared/tools.ts` | Tool registry | `TOOLS[]` (name, Zod schema, handler). `toOpenAITools()` (via `z.toJSONSchema`), `dispatch()`. Single source of truth for tools. |
+| `lambda/shared/openai.ts` | OpenAI client | `fetch`-based, no SDK. `streamChatCompletion()` (SSE parse + tool-call assembly), `responseJsonSchema()` (web search + strict JSON). Models via env. |
+| `lambda/shared/nutrition-search.ts` | Nutrition lookup | `searchNutritionFacts(query)` → `NutritionFacts` shaped like `AddFoodItemInput`. |
+| `lambda/shared/system-prompt.ts` | Assistant persona | Single source of truth for behavior + tool policy + daily targets. Edit here, redeploy. |
+| `lambda/shared/db.ts` | Food + daily helpers | All `(userId, …)`. Normalization + daily-tracker logic. |
+| `lambda/shared/units.ts` | Serving math | `computeQuantityFromServing(serving, amountEaten)`; refuses on unit mismatch. |
+| `lambda/shared/users.ts` / `hash.ts` | Auth lookup / hashing | `resolveUser` reads users table by key hash; `hashApiKey` shared with the CLI. |
+| `web/src/App.tsx` | Chat UI | Streaming render, tool chips, settings modal (key + backend URL). |
+| `web/src/api.ts` | Browser client | `streamChat()` SSE reader, `loadConfig()` (fetches `/config.json`), `toolLabel()`. |
 | `types.ts` | Shared types | `FoodItem`, `UserRecord`, tool I/O. |
-| `scripts/manage-users.ts` | Admin CLI | `add`/`list`/`revoke`. Runs locally with deploy creds, NOT in the Lambda. |
-| `scripts/bootstrap.sh` | One-command setup+deploy+first-user | macOS; idempotent. |
+| `scripts/manage-users.ts` | Admin CLI | `add`/`list`/`revoke`; local, with deploy creds. NOT in the Lambda. |
 
 ## Data model (get this right)
 
-**`food-tracker-items`** — partition `userId`, sort `itemLower`:
-
-```jsonc
-{ "userId": "usr_9f2c1a",       // PK: whose food
-  "itemLower": "greek yogurt",  // SK: toKey(name) = trim().toLowerCase()
-  "item": "Greek yogurt",       // display name, original casing
-  "aliases": ["..."],           // normalized + de-duplicated
-  "calories": 160, "proteinG": 17, "fatG": 0, "carbsG": 9,  // macros optional
-  "serving": { "quantity": 6, "unit": "oz" } }  // optional; oz (weight) or floz (volume)
-```
-
-**`food-tracker-users`** — partition `apiKeyHash` → `{ userId, name, createdAt }`.
-Only the SHA-256 **hash** of the key is stored.
-
-**`food-tracker-daily`** — partition `userId`, sort `dayOrder`:
-
-```jsonc
-{
-  "userId": "usr_9f2c1a",
-  "dayOrder": "2026-07-15#0001",
-  "day": "2026-07-15",
-  "order": 1,
-  "item": "Apple",
-  "calories": 95,
-  "proteinG": 0,
-  "fatG": 0,
-  "carbsG": 25,
-  "cumulativeCalories": 95,
-  "cumulativeProteinG": 0,
-  "cumulativeFatG": 0,
-  "cumulativeCarbsG": 25,
-  "serving": { "quantity": 6, "unit": "oz" }
-}
-```
-
-The daily tracker stores each logged item for a Central Time day, including item order and running totals. `addFoodToDailyCount` appends a new entry, `listDailyEntries` returns the day's entries, and `deleteDailyEntry` removes one entry while renumbering later rows and recomputing cumulative totals.
+- **`food-tracker-items`** — PK `userId`, SK `itemLower` (`trim().toLowerCase()`);
+  `item` (display), `aliases[]`, `calories`, optional `proteinG/fatG/carbsG`,
+  optional `serving {quantity, unit: "oz"|"floz"}`.
+- **`food-tracker-daily`** — PK `userId`, SK `dayOrder` (`YYYY-MM-DD#0001`); per-item
+  and cumulative calories/macros for a Central-Time day.
+- **`food-tracker-users`** — PK `apiKeyHash` → `{ userId, name, createdAt }`. Hash only.
 
 **Invariants:**
-- Every food write MUST include both `userId` (PK) and `itemLower` (SK). Missing
-  either throws a DynamoDB `ValidationException`.
+- Every food write MUST include `userId` (PK) + `itemLower` (SK).
 - **Never read/write food without a `userId` filter.** `findFoodItem` uses a
-  `Query` keyed on `userId` (not a `Scan`), so it structurally cannot return
-  another user's rows. If you add a query path, keep it partition-scoped — do not
-  reintroduce a full-table `Scan`.
-- `toKey()` / `normalizeAliases()` in `db.ts` are the single source of
-  normalization; reuse them, don't re-lowercase ad hoc. `hashApiKey()` in
-  `hash.ts` is the single source of key hashing.
+  partition `Query`, never a `Scan`. Keep any new query path partition-scoped.
+- `toKey()` / `normalizeAliases()` in `db.ts` are the single normalization source;
+  `hashApiKey()` in `hash.ts` is the single hashing source. Reuse them.
 
 ## Conventions
 
 - **ESM + TypeScript**, `"type": "module"`, `moduleResolution: "bundler"`.
-- **Import shared types without a file extension**: `from "../../types"` (not
-  `"../../types.ts"` — `tsc --noEmit` rejects `.ts` extensions here; esbuild is
-  fine either way).
+- **TypeScript is the v7 native port.** Its `typeRoots` auto-discovery is flaky, so
+  the root `tsconfig.json` sets **`"types": ["node"]`** explicitly — without it the
+  whole project fails with "Cannot find name 'process'". If you need another global
+  `@types` package, add it to that list.
+- **Import shared types without a file extension**: `from "../../types"`.
 - Lambda is bundled by CDK `NodejsFunction` (esbuild, minified). Do **not** add
-  native/compiled dependencies — arm64/Graviton2 assumes pure-JS deps.
-- `tsconfig.json` has no `include`, so `tsc` also type-checks `scripts/` and
-  `bin/`. Run `npm run build` after any edit.
-
-## Common commands
-
-```bash
-npm run build      # tsc --noEmit — full typecheck, NO AWS calls. Run after edits.
-npx cdk synth      # local CloudFormation synth (no secret needed)
-npx cdk diff       # what a deploy would change
-npm run user -- add --name "X" --url "<McpServerUrl>"   # mint a user + key
-npm run user -- list | revoke --name "X"
-```
-
-`build` is the cheap, offline correctness check — prefer it for verifying changes.
-
-### Synth without touching an account
-
-`cdk synth` is local, but the CLI resolves the default AWS account via
-`sts:GetCallerIdentity` first. To synth with zero AWS contact (e.g. wrong account
-active), neutralize the credential chain:
-
-```bash
-env -u AWS_PROFILE -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
-    AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
-    CDK_DEFAULT_REGION=us-east-1 npx cdk synth --no-lookups --no-notices
-```
+  native/compiled deps — arm64/Graviton2 assumes pure-JS. The OpenAI client is raw
+  `fetch` on purpose (no SDK).
+- The root `tsconfig.json` **excludes `web/`** (the SPA has its own `web/tsconfig.json`
+  with DOM/JSX libs). `npm run build` type-checks the backend only.
+- `.gitignore` ignores `*.d.ts`; `lambda/chat/awslambda.d.ts` is un-ignored with a
+  `!` negation — keep it that way.
 
 ## Gotchas & guardrails
 
 - **Never run `cdk deploy/bootstrap`, `aws …`, `npm run user`, `npm run setup`, or
-  anything that mutates AWS unless the human explicitly asks and confirms the
-  target account.** `cdk synth` (as above) and `npm run build` are local and safe.
-  This repo targets a *specific personal* account; deploying to the wrong one is
-  easy and unwanted.
-- **Function URL identity.** Changing the Lambda's `architecture` or `runtime`
-  forces a function *replacement*, which changes the Function URL and breaks all
-  users' clients. Call this out in any PR that touches those props.
-- **Key schema is immutable.** You can't change a table's partition/sort key in
-  place — it forces table replacement, and both tables are `RemovalPolicy.RETAIN`
-  (so the old table lingers and blocks the rename). Fine on first deploy (no data);
-  otherwise it needs a migration.
-- **Free tier.** Both tables are `BillingMode.PROVISIONED` on purpose; the free
-  25 RCU / 25 WCU is shared account-wide. Don't flip to on-demand or raise
-  capacity without a reason. Don't add a VPC/NAT Gateway.
-- **Lambda is read-only on the users table** by design. Do not widen that grant to
-  let the Lambda write keys — key management is admin-only.
-- **Secrets.** API keys are shown once by `manage-users.ts` and stored only as
-  hashes. Never log a raw key; never persist one in a fixture or the repo.
-- **HTTP header handling (read before touching `index.ts`).** `serverless-http`
-  builds the Lambda request with an **empty `rawHeaders`** array, and the MCP
-  transport (via `@hono/node-server`) reads request headers **only** from
-  `rawHeaders` — so without intervention *every* request 406s ("must accept both
-  application/json and text/event-stream"), for all clients including Joey.
-  `normalizeHeadersForTransport()` forces Accept/Content-Type **and rebuilds
-  `req.rawHeaders` from `req.headers`** — the rawHeaders rebuild is the
-  load-bearing part; do not remove it. Also note the transport's Accept check is a
-  naive substring match (even `*/*` fails). `enableJsonResponse: true` makes
-  responses plain JSON. Verified: without this, a real `*/*` request → 406; with
-  it → 200.
-- **No tests exist yet.** If you add logic to `db.ts`, prefer a small test harness
+  anything that mutates AWS unless the human explicitly asks and confirms the target
+  account.** `npm run build` and offline `cdk synth` are local and safe. This repo
+  targets a *specific personal* account.
+- **`OPENAI_API_KEY` is required at runtime** (Lambda env var from `.env`). The app
+  deploys without it but every chat request errors until it's set + redeployed.
+- **The web app must be built before synth/deploy.** `lib/food-tracker-stack.ts`
+  points `BucketDeployment` at `web/dist`; if it's missing, `cdk synth`/`deploy`
+  fails on the asset. Run `npm run build:web` first (or `npm run deploy`, which does).
+- **Function URL identity.** Changing the chat Lambda's `architecture`/`runtime`
+  replaces the function and changes its Function URL. CDK rewrites the site's
+  `config.json` on deploy, so the app self-heals — but call it out in a PR.
+- **Streaming handler.** Open the 200 SSE stream only after auth. Set CORS headers on
+  both the Function URL config and the streamed response. Don't switch it to Express.
+- **Free tier.** Tables are `BillingMode.PROVISIONED` on purpose (shared 25 RCU/WCU).
+  Don't flip to on-demand or add a VPC/NAT Gateway. CloudFront uses `PRICE_CLASS_100`.
+- **Lambda is read-only on the users table** by design — never widen it to write keys.
+- **Secrets.** API keys are shown once by `manage-users.ts` and stored as hashes.
+  Never log a raw key or the OpenAI key; never commit either.
+- **No tests yet.** If you add logic to `db.ts`/`units.ts`, prefer a small harness
   over manual DynamoDB pokes; ask before introducing a test framework.
 
 ## Where to make common changes
 
-- **New tool** → Zod schema + `registerTool` in `mcp.ts` (bind `userId`), a helper
-  in `db.ts` (`(userId, …)`), and any new shape in `types.ts`.
-- **Change the LLM's behavior / persona** → `system-prompt.ts` (single source).
-  It's the server `instructions` + `counter_context` prompt; redeploy to update
-  the server copy. Same text for all users, so keep it non-personal.
+- **New tool** → add an entry to `TOOLS` in `lambda/shared/tools.ts` (Zod schema +
+  `(userId, args)` handler), a helper in `db.ts` if it touches storage, and any new
+  shape in `types.ts`. It's automatically exposed to the model — no other wiring.
+- **Change the assistant's behavior / targets** → `lambda/shared/system-prompt.ts`.
 - **New stored food field** → extend `FoodItem` + `AddFoodItemInput` in `types.ts`,
-  the schema in `mcp.ts`, and the record built in `db.ts:addFoodItem`.
-- **User/auth change** → `users.ts` (lookup), `index.ts` (`authenticate`),
-  `manage-users.ts` (admin ops). Keep `hash.ts` the single hashing source.
-- **Infra change** → `lib/food-tracker-stack.ts`; re-check the free-tier,
-  key-schema, and Function-URL-identity notes above.
+  the schema in `tools.ts`, and the record built in `db.ts:addFoodItem`.
+- **Frontend** → `web/src/App.tsx` + `web/src/api.ts`; rebuild with `npm run build:web`.
+- **Infra change** → `lib/food-tracker-stack.ts`; re-check free-tier, key-schema,
+  and Function-URL-identity notes above, and update `iam/` if new services are used.

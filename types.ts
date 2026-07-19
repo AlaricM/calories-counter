@@ -79,9 +79,9 @@ export type FindFoodItemOutput = {
 }
 
 /**
- * A user of the MCP server. One API key = one user. Only the SHA-256 hash of
- * the key is stored (see lambda/mcp-server/hash.ts), so a table read can't
- * recover anyone's usable credential.
+ * A user of the app. One API key = one user. Only the SHA-256 hash of the key is
+ * stored (see lambda/shared/hash.ts), so a table read can't recover anyone's
+ * usable credential.
  */
 export type UserRecord = {
     apiKeyHash: string;

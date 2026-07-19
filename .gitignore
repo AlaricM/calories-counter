@@ -1,6 +1,7 @@
 node_modules/
 cdk.out/
 *.d.ts
+!lambda/chat/awslambda.d.ts
 *.js
 !.eslintrc.js
 .env
@@ -8,3 +9,4 @@ cdk.out/
 *.log
 .cdk.staging/
 cdk-outputs.json
+web/dist/

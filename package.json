@@ -1,23 +1,23 @@
 {
-  "name": "food-tracker-mcp",
+  "name": "calorie-tracker-app",
   "type": "module",
   "version": "0.1.0",
   "private": true,
-  "description": "Remote MCP server (Lambda + DynamoDB, deployed with CDK) exposing add_food_item / find_food_item tools for a personal food database.",
+  "description": "AI calorie/macro tracker: a React web app on S3+CloudFront, a streaming Lambda chat backend (OpenAI gpt-5-nano + tools), and DynamoDB storage — deployed with the AWS CDK.",
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit",
+    "build:web": "npm --prefix web install && npm --prefix web run build",
     "cdk": "cdk",
     "bootstrap": "cdk bootstrap",
     "diff": "cdk diff",
     "synth": "cdk synth",
-    "deploy": "cdk deploy",
+    "deploy": "npm run build:web && cdk deploy",
     "destroy": "cdk destroy",
     "user": "tsx scripts/manage-users.ts",
     "setup": "bash scripts/bootstrap.sh"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.162",
-    "@types/express": "^5.0.6",
     "@types/node": "^26.1.1",
     "aws-cdk": "^2.1130.0",
     "esbuild": "^0.28.1",
@@ -27,12 +27,9 @@
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1085.0",
     "@aws-sdk/lib-dynamodb": "^3.1085.0",
-    "@modelcontextprotocol/sdk": "^1.29.0",
     "aws-cdk-lib": "^2.261.0",
     "constructs": "^10.6.0",
     "dotenv": "^17.4.2",
-    "express": "^5.2.1",
-    "serverless-http": "^4.0.0",
     "zod": "^4.4.3"
   }
 }

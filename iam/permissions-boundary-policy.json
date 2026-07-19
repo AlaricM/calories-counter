@@ -30,6 +30,33 @@
       ]
     },
     {
+      "Sid": "SiteDeploymentS3Access",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject*",
+        "s3:GetBucket*",
+        "s3:List*",
+        "s3:PutObject*",
+        "s3:DeleteObject*",
+        "s3:Abort*"
+      ],
+      "Resource": [
+        "arn:aws:s3:::cdk-hnb659fds-assets-<ACCOUNT_ID>-us-east-1",
+        "arn:aws:s3:::cdk-hnb659fds-assets-<ACCOUNT_ID>-us-east-1/*",
+        "arn:aws:s3:::foodtrackermcpstack-*",
+        "arn:aws:s3:::foodtrackermcpstack-*/*"
+      ]
+    },
+    {
+      "Sid": "SiteDeploymentCloudFrontInvalidate",
+      "Effect": "Allow",
+      "Action": [
+        "cloudfront:CreateInvalidation",
+        "cloudfront:GetInvalidation"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "BudgetKillSwitchAttach",
       "Effect": "Allow",
       "Action": [

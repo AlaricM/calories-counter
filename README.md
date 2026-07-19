@@ -1,385 +1,251 @@
-# food-tracker-mcp
+# calorie-tracker
 
-A tiny **remote MCP server** that acts as long-term memory for a calorie/macro
-counter. You tell a cheap LLM (through the [Joey MCP client](https://benkaiser.github.io/joey-mcp-client/)
-+ [OpenRouter](https://openrouter.ai/)) what you ate; the model saves and recalls
-each food's calories and macros from **your own DynamoDB table** — so you don't
-have to re-specify "greek yogurt = 160 cal, 17g protein" every single day.
+A tiny **AI calorie & macro tracker** you talk to like ChatGPT. Tell it what you
+ate in plain words; it looks up nutrition facts (from your own database, or the
+open web when it doesn't know a food), keeps a running daily log, and tells you
+what you have left against your targets — all backed by **your own DynamoDB**.
 
-The whole point is to make the *model* dumb and the *memory* reliable: even a
-small, inexpensive model can keep an accurate daily food log because the facts
-live in the database, not in the prompt.
+The whole point is to make logging effortless: the model does the talking and the
+tool-calling, but correctness lives in the database and in deterministic
+serving-size math, not in the model's head.
 
-**Multi-user:** one API key = one user. It's just you today, but you can hand a
-friend their own key and their food data is completely separate from yours (each
-user lives in their own DynamoDB partition). Add or revoke users anytime with no
-redeploy.
+It's three things, all in your personal AWS account:
 
-Deployed to your personal AWS account with the AWS CDK, running entirely inside
-AWS's permanent **"Always Free"** tier (Lambda + DynamoDB), so at personal scale
-it costs **~$0/month**.
+- **A React web app** (static, on S3 + CloudFront) — a clean streaming chat UI.
+- **A streaming Lambda backend** — holds the system prompt and runs the agentic
+  loop against **OpenAI `gpt-5-nano`**, calling food/daily tools in-process.
+- **An internet nutrition search** — a tool that web-searches nutrition facts for
+  common foods (ribeye, oatmeal, …) and converts them to our per-oz/floz storage
+  shape, used automatically when a food is unknown or your data is incomplete.
 
-## Tools exposed to the LLM
+**Multi-user:** one API key = one user. Each person's food data is completely
+isolated in its own DynamoDB partition. Add or revoke users anytime, no redeploy.
 
-| Tool | What it does |
-|------|--------------|
-| `add_food_item` | Store a food's name + calories/macros (optional aliases, serving size) |
-| `add_alias` | Add an alternative name to an existing food |
-| `find_food_item` | Look up a saved food by name or alias (exact, then partial match) |
-| `add_food_to_daily_count` | Append a known food to today's daily tracker and update cumulative totals |
-| `list_daily_entries` | List today's daily tracked food entries and cumulative totals |
-| `delete_daily_entry` | Remove a single entry from today's daily tracker without deleting the saved food |
-| `delete_food_item` | Delete a saved food item by canonical name |
-
-Typical conversation: *"add cheese sticks, 50 cal, 6g protein, 2.5g fat"* →
-`add_food_item`. Later: *"I ate 6oz of chicken today"* → `add_food_to_daily_count`
-with `amountEaten: "6oz"` — the server divides that by the food's saved serving
-size to get the multiplier, so the model never has to do the arithmetic. When the
-user wants a summary the model uses `list_daily_entries`.
+Everything AWS-side runs in the **Always-Free tier** (Lambda + DynamoDB) or the
+CloudFront free tier, so at personal scale AWS costs **~$0/month**. The only real
+cost is OpenAI usage, and `gpt-5-nano` is very cheap.
 
 ## How it works
 
 ```
-Joey MCP Client (phone / desktop — runs the agentic loop)
-  ├─ OpenRouter  ── the LLM (pick a cheap model: GPT-4o-mini, Gemini Flash, Llama…)
-  └─ HTTPS ─────> Lambda Function URL ─> Lambda (Express + MCP SDK) ─> DynamoDB
-                        │
-                        └─ each request carries a per-user API key → scoped to that user
+Browser (React app on CloudFront + S3, HTTPS)
+  │  POST { messages }  +  Authorization: Bearer <API key>      ⟵ SSE stream back
+  ▼
+Chat Orchestrator Lambda  (Function URL, RESPONSE_STREAM, gpt-5-nano)
+  ├─ resolve API key → userId                              (users table, read-only)
+  ├─ agentic loop with OpenAI + tools:
+  │     ├─ find_food_item / add_food_item / add_food_to_daily_count / …  → DynamoDB
+  │     └─ search_nutrition_facts → OpenAI Responses web_search → per-oz/floz facts
+  └─ streams token deltas + tool activity back to the browser
 ```
 
-Joey is the orchestrator: the model decides when to call a tool, Joey executes
-the call against your Lambda (sending the user's API key), Lambda resolves the
-key to a `userId` and runs the tool against *only* that user's data, then the
-result flows back to the model. Your Lambda holds no LLM logic and no OpenRouter
-key.
+The browser holds the conversation and sends it each turn; the backend is
+**stateless** (durable state — foods and the daily log — lives in DynamoDB). The
+API key is stored only in the browser (localStorage) and sent as a Bearer header.
 
-- **Lambda** — Node.js 24 on **arm64/Graviton2**, an Express app wrapping the MCP
-  TypeScript SDK's `StreamableHTTPServerTransport` in **stateless** mode (a fresh
-  server per request — nothing needs to survive between invocations).
-- **Function URL** (not API Gateway) — free, and supports the chunked responses
-  the MCP transport can use. IAM auth is `NONE` **by design**; access is gated
-  per-user by the API key checked inside the Lambda (see [Security](#security)).
+### Tools the model can call
+
+| Tool | What it does |
+|------|--------------|
+| `find_food_item` | Look up a saved food by name/alias (exact, partial, then fuzzy) |
+| `search_nutrition_facts` | Web-search nutrition facts for a common food → per oz/floz |
+| `add_food_item` | Save a food's calories/macros + serving (oz/floz) |
+| `add_alias` | Add an alternative name to a saved food |
+| `add_food_to_daily_count` | Log a food into today's totals (converts `amountEaten` for you) |
+| `list_daily_entries` | List today's entries + cumulative totals |
+| `delete_daily_entry` | Remove one logged entry (renumbers + recomputes totals) |
+| `delete_food_item` | Delete a saved food |
+
+Typical flow: *"I ate 6oz ribeye"* → `find_food_item` (miss) →
+`search_nutrition_facts` → `add_food_item` (saves ribeye per-oz) →
+`add_food_to_daily_count` with `amountEaten: "6oz"`. The Lambda divides 6oz by the
+saved serving to get the multiplier, so the model never does the arithmetic.
+
+### Serving-size math (why it's reliable)
+
+Servings are stored as a precise weight (`oz`) or volume (`floz`), never freeform
+text. When you report an amount, the model converts it to oz/floz and the server
+divides it by the saved serving to get the multiplier — deterministic, and it
+refuses on a unit mismatch instead of guessing (see
+[`lambda/shared/units.ts`](lambda/shared/units.ts)).
 
 ### Data model — three DynamoDB tables
 
-**`food-tracker-items`** — composite key isolates each user's foods:
+**`food-tracker-items`** — partition `userId`, sort `itemLower` (normalized name):
 
 ```jsonc
-{
-  "userId":    "usr_9f2c1a",     // partition key — whose food this is
-  "itemLower": "greek yogurt",   // sort key — normalized name (trim + lowercase)
-  "item":      "Greek yogurt",   // display name, original casing
-  "aliases":   ["160 cal greek yogurt"],  // normalized, de-duplicated
-  "calories":  160,
-  "proteinG":  17, "fatG": 0, "carbsG": 9,   // all optional
-  "serving":   { "quantity": 6, "unit": "oz" } // optional; oz (weight) or floz (volume)
-}
+{ "userId": "usr_9f2c1a", "itemLower": "greek yogurt", "item": "Greek yogurt",
+  "aliases": ["160 cal greek yogurt"],
+  "calories": 160, "proteinG": 17, "fatG": 0, "carbsG": 9,   // macros optional
+  "serving": { "quantity": 6, "unit": "oz" } }               // optional; oz or floz
 ```
 
-Serving is stored as a structured weight (`oz`) or volume (`floz`), never freeform
-text, so an amount the user later reports (also converted to oz/floz) can be
-reconciled against it deterministically — the server divides "6oz eaten" by a
-saved "2oz" serving to get the multiplier, instead of trusting a weak model's
-mental arithmetic (see [`lambda/mcp-server/units.ts`](lambda/mcp-server/units.ts)).
+A lookup is a `Query` on the user's partition, so results can **never** include
+another user's items — isolation is structural, not a filter that could be forgotten.
 
-A lookup is a `Query` on the user's partition, so results can *never* include
-another user's items — isolation is structural, not a filter that could be
-forgotten.
+**`food-tracker-daily`** — partition `userId`, sort `dayOrder` (`day#order`): each
+logged item for a Central-Time day, with per-item and cumulative calories/macros.
 
-**`food-tracker-daily`** — composite key isolates each user's daily entries:
-
-```jsonc
-{
-  "userId": "usr_9f2c1a",
-  "dayOrder": "2026-07-15#0001",
-  "day": "2026-07-15",
-  "order": 1,
-  "item": "Apple",
-  "calories": 95,
-  "proteinG": 0,
-  "fatG": 0,
-  "carbsG": 25,
-  "cumulativeCalories": 95,
-  "cumulativeProteinG": 0,
-  "cumulativeFatG": 0,
-  "cumulativeCarbsG": 25,
-  "serving": { "quantity": 6, "unit": "oz" }
-}
-```
-
-The daily tracker stores the order and cumulative totals for each item logged on
-that Central Time day. If an item is removed with `delete_daily_entry`, later
-entries are renumbered and the remaining cumulative totals are recomputed.
-
-**`food-tracker-users`** — maps an API key to a user:
-
-```jsonc
-{
-  "apiKeyHash": "b1946ac9…",  // partition key — SHA-256 of the API key
-  "userId":     "usr_9f2c1a",
-  "name":       "Alaric",
-  "createdAt":  "2026-07-15T10:40:00.000Z"
-}
-```
-
-Only the **hash** of each key is stored, so a database read can't recover anyone's
-usable credential. The Lambda has **read-only** access to this table; keys are
-minted/revoked by an admin CLI (below) using your deploy credentials.
+**`food-tracker-users`** — partition `apiKeyHash` → `{ userId, name, createdAt }`.
+Only the **SHA-256 hash** of a key is stored, so a table read can't recover a
+usable credential. The Lambda has **read-only** access here; keys are minted only
+by the admin CLI with your deploy credentials.
 
 ## Repo layout
 
 ```
-calories-counter/
-├── bin/iac.ts                    CDK app entry point (reads optional .env, builds the stack)
-├── lib/food-tracker-stack.ts     CDK stack: 2 DynamoDB tables + Lambda + Function URL + budget
-├── lambda/mcp-server/
-│   ├── index.ts                  HTTP handler: Express + per-user auth + MCP transport
-│   ├── mcp.ts                    MCP tool definitions + system-prompt wiring (bound to a userId)
-│   ├── system-prompt.ts          The always-on counter persona (edit your targets here)
-│   ├── db.ts                     Food-item read/write helpers (userId-scoped)
-│   ├── users.ts                  Resolve an API key → user (reads the users table)
-│   └── hash.ts                   SHA-256 of an API key (shared by Lambda + admin CLI)
-├── types.ts                      Shared FoodItem / UserRecord / tool I/O types
-├── scripts/
-│   ├── bootstrap.sh              One-command local setup + deploy + first user (macOS)
-│   └── manage-users.ts           Admin CLI: add / list / revoke users
-├── .env.example                  Optional config template (cost alerts)
-├── cdk.json  package.json  tsconfig.json
-└── AGENTS.md                     Orientation for AI coding agents
+calorie-tracker/
+├── bin/iac.ts                     CDK app entry (reads .env: OPENAI_API_KEY, cost alerts)
+├── lib/food-tracker-stack.ts      CDK stack: 3 tables + chat Lambda + streaming URL +
+│                                   S3/CloudFront site + BucketDeployment + budget guardrail
+├── lambda/
+│   ├── chat/index.ts              Streaming orchestrator: auth + OpenAI agentic loop + SSE
+│   ├── chat/awslambda.d.ts        Ambient types for the Lambda streaming globals
+│   └── shared/
+│       ├── tools.ts               Tool registry: schemas + handlers + OpenAI adapter + dispatch
+│       ├── openai.ts              fetch-based OpenAI client (streaming chat + web search)
+│       ├── nutrition-search.ts    Web-search nutrition lookup → per-oz/floz facts
+│       ├── system-prompt.ts       The assistant persona + tool policy + daily targets (EDIT here)
+│       ├── db.ts                  Food-item + daily helpers (all userId-scoped)
+│       ├── units.ts               amountEaten → serving-multiplier math
+│       ├── users.ts               resolve API key → user
+│       └── hash.ts                SHA-256 of an API key (shared with the admin CLI)
+├── web/                           React + Vite + Tailwind chat app (builds to web/dist)
+│   └── src/{App.tsx, api.ts, main.tsx, index.css}
+├── types.ts                       Shared types
+├── scripts/{manage-users.ts, bootstrap.sh}
+├── iam/                           Least-privilege deploy/runtime policies (see iam/README.md)
+└── .env.example                   OPENAI_API_KEY (+ optional cost alerts)
 ```
 
 ---
 
 # From scratch: zero to running
 
-Steps 1–3 are **manual** (you can't script creating an AWS account or IAM user).
-Everything after that is one command: [`scripts/bootstrap.sh`](scripts/bootstrap.sh).
+Steps 1–4 are **manual** (you can't script an AWS account or an OpenAI key).
+Everything after is one command: [`scripts/bootstrap.sh`](scripts/bootstrap.sh).
 
-## Step 1 — Create an AWS account (manual)
+## Step 1 — Create an AWS account & secure the root user
 
-1. Go to <https://portal.aws.amazon.com/billing/signup> and sign up.
-2. Verify email, phone, and add a payment method (required even for free tier).
-3. **Immediately secure the root user**: sign in as root → **Security
-   credentials** → enable **MFA**. Then stop using root for anything else.
+Sign up at <https://portal.aws.amazon.com/billing/signup>, then sign in as root →
+**Security credentials** → enable **MFA**. Stop using root after that.
 
-## Step 2 — Create a non-root admin user (manual, IAM hygiene)
+## Step 2 — Create a non-root admin user (IAM hygiene)
 
-Never deploy as the root account. Create a dedicated user instead:
+Console → **IAM** → **Users** → **Create user** (e.g. `cdk-deployer`). For a solo
+account the pragmatic choice is the AWS-managed **`AdministratorAccess`** policy
+(tighten later — see [`iam/README.md`](iam/README.md)). Enable **MFA**, then
+**Create access key** → *CLI* and copy the key ID + secret.
 
-1. Console → **IAM** → **Users** → **Create user** (e.g. `cdk-deployer`).
-2. Attach permissions. For a **solo personal account** the pragmatic choice is
-   the AWS-managed **`AdministratorAccess`** policy — you own everything in the
-   account anyway. (Tighter options in [Security](#security).)
-3. Create the user, then open it → **Security credentials** → **Enable MFA**.
-4. Same page → **Create access key** → *Command Line Interface (CLI)*. Copy the
-   **Access key ID** and **Secret access key** (shown once).
-
-## Step 3 — Point the AWS CLI at that user (manual)
-
-Install the AWS CLI if you don't have it (`brew install awscli`), then:
+## Step 3 — Point the AWS CLI at that user
 
 ```bash
-aws configure
-# AWS Access Key ID:     <paste>
-# AWS Secret Access Key: <paste>
-# Default region name:   us-east-1     # or your preferred region
-# Default output format: json
+brew install awscli    # if needed
+aws configure          # paste the key/secret; region e.g. us-east-1; output json
+aws sts get-caller-identity   # must print your account ID
 ```
 
-Verify it works — this must print your account ID:
+## Step 4 — Get an OpenAI API key
 
-```bash
-aws sts get-caller-identity
-```
+Create one at <https://platform.openai.com/api-keys>. You'll put it in `.env` as
+`OPENAI_API_KEY` (the bootstrap script creates `.env` and reminds you).
 
-## Step 4 — Everything else, in one command
-
-From the repo root:
+## Step 5 — Everything else, in one command
 
 ```bash
 ./scripts/bootstrap.sh          # or: npm run setup
 ```
 
-That script (macOS, idempotent, safe to re-run) will:
+That script (macOS, idempotent) installs Node/AWS CLI if missing, `npm ci`s,
+**builds the React app**, `cdk bootstrap`s (first time only) and `cdk deploy`s,
+then mints your first user + API key and prints it. Copy the **`SiteUrl`** it
+prints, open it, click **⚙︎ Settings**, and paste your API key.
 
-- install **Homebrew**, **Node** (>=20; via `nvm` if needed), and the **AWS CLI**
-  if any are missing;
-- verify your AWS credentials (fails early with instructions if Step 3 isn't done);
-- run `npm ci`;
-- `cdk bootstrap` (first time per account/region) and `cdk deploy`;
-- create your **first user + API key** and print it (skipped if one already exists).
-
-Copy the printed URL + `Authorization: Bearer <key>` — that's what goes into Joey.
-
-### …or do Step 4 manually
+### …or do it manually
 
 ```bash
-# prerequisites (macOS)
-brew install node awscli          # or use nvm to match .nvmrc (Node 24)
-
-# project + deploy
+cp .env.example .env            # then set OPENAI_API_KEY=...
 npm ci
-npx cdk bootstrap                 # first time per account/region only
-npx cdk deploy                    # prints the McpServerUrl output
-
-# create yourself as the first user (prints your key once)
-npm run user -- add --name "Your Name" --url "<McpServerUrl from cdk deploy>"
+npm run build:web               # build the React app into web/dist
+npx cdk bootstrap               # first time per account/region only
+npx cdk deploy                  # prints SiteUrl + ChatApiUrl
+npm run user -- add --name "Your Name" --url "<SiteUrl>"   # prints your key once
 ```
 
-> Deploying needs **no secret** — auth is per-user and stored (hashed) in
-> DynamoDB. `.env` is optional and only carries cost-alert settings; copy
-> `.env.example` to `.env` and set `ALERT_EMAIL` if you want cost emails.
+> `npm run deploy` is a shortcut for `npm run build:web && cdk deploy`.
 
-## Step 5 — Managing users (giving a friend a key)
+## Managing users (giving a friend a key)
 
 The admin CLI runs locally with your AWS credentials (the Lambda can't mint keys):
 
 ```bash
-# add a friend — prints their key ONCE, plus ready-to-paste Joey settings
-npm run user -- add --name "Jane" --url "<McpServerUrl>"
-
-# see everyone (no secrets shown)
-npm run user -- list
-
-# revoke someone (deletes their key; their stored food data is left intact)
-npm run user -- revoke --name "Jane"
+npm run user -- add --name "Jane" --url "<SiteUrl>"   # prints their key ONCE
+npm run user -- list                                  # no secrets shown
+npm run user -- revoke --name "Jane"                  # deletes the key; food data kept
 ```
 
-Each `add` mints a brand-new user with its own isolated data. (To give one
-person a *second* key that shares their existing data, pass
-`--user <their userId>`.)
+Each `add` mints a new user with isolated data. (`--user <userId>` gives someone a
+second key that shares existing data.) An API key is a password to that user's
+data — it's shown only once.
 
-> ⚠️ An API key is a password to that user's food database. It's shown only once
-> on creation — anyone who has it can read/write that user's data.
+## Tuning the assistant (persona + your targets)
 
-## Step 6 — Wire up Joey + OpenRouter
-
-1. Install [Joey](https://benkaiser.github.io/joey-mcp-client/) (iOS, Android,
-   macOS; Windows/Linux experimental).
-2. Create an [OpenRouter](https://openrouter.ai/) account → **Keys** → create an
-   API key → paste it into Joey's settings. Pick a **cheap model that supports
-   tool calling** — e.g. `openai/gpt-4o-mini`, `google/gemini-flash-1.5`, or
-   `meta-llama/llama-3.3-70b-instruct`. (Check the model shows a **Tools**
-   capability on <https://openrouter.ai/models> — tool calling is required.)
-3. In Joey, add a remote MCP server:
-   - **URL**: the `McpServerUrl` value
-   - **Headers / auth**: `Authorization: Bearer <your API key>`
-4. Start a chat, enable the food-tracker server, and say
-   *"add cheese sticks, 50 cal, 6g protein"* — the model will call your Lambda.
-
-### Connect Claude instead (alternative)
-
-Claude's custom-connector UI has no header field, so it uses the secret-in-path
-URL: **Settings → Connectors → Add custom connector**, paste
-`<McpServerUrl>/<your API key>`, save, then enable it for a conversation.
-
-## Step 7 — Smoke-test the endpoint (optional)
-
-The server is lenient about request headers — any `Accept` (even `*/*` or none)
-works, and it replies with plain `application/json`:
-
-```bash
-curl -s -X POST "<McpServerUrl>" \
-  -H "Authorization: Bearer <your API key>" \
-  -H "Content-Type: application/json" \
-  -H "Accept: */*" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl-test","version":"0.0.1"}}}'
-```
-
-A response containing `result.serverInfo.name: "food-tracker"` means it's wired
-up. `401` = no key sent; `403` = key not recognized.
-
----
-
-## Give the LLM a consistent persona
-
-You almost certainly want the model to behave the same way in every chat — *"you
-are my calorie counter; macros must sum to calories; if fat runs high, cut carbs
-rather than raise the calorie cap,"* and so on. That text lives in one place:
-[`lambda/mcp-server/system-prompt.ts`](lambda/mcp-server/system-prompt.ts) —
-**edit the "Daily targets" block to your own numbers.**
-
-It reaches the model up to three ways:
-
-1. **Automatic (server `instructions`).** The server advertises the prompt in its
-   MCP handshake; clients that honor MCP instructions add it to the system prompt
-   for you, so it applies to every conversation with no per-chat setup. Push
-   changes with `npx cdk deploy`.
-2. **On demand (`counter_context` prompt).** The server also exposes it as an MCP
-   *prompt*, for clients that support prompts but don't auto-apply instructions —
-   insert it from the client's prompt/slash menu.
-3. **Guaranteed (paste into your client).** Whether a given client auto-applies
-   (1) isn't guaranteed, so for a hard guarantee also paste the same text into
-   Joey's **system-prompt / custom-instructions** field (or an OpenRouter system
-   message if you build your own client). Copy it straight from the file above.
-
-> Multi-user note: the server sends the **same** instructions to every API key, so
-> keep personal specifics light — each person can set their own daily targets in
-> their own client.
+Everything about how the model behaves — its persona, the tool-use policy, and
+**your daily targets** — lives in one file:
+[`lambda/shared/system-prompt.ts`](lambda/shared/system-prompt.ts). Edit the
+"Daily targets" block to your numbers and `npx cdk deploy`. To trade cost/quality,
+override `OPENAI_CHAT_MODEL` / `OPENAI_SEARCH_MODEL` (see `.env.example`).
 
 ## Security
 
 - **Per-user isolation.** Food data is partitioned by `userId`; lookups are a
   `Query` on that partition, so one user physically cannot read another's data.
-- **Keys stored hashed.** The users table holds only `SHA-256(key)`. A leak of
-  the table doesn't expose usable keys, and keys are shown exactly once at
-  creation.
-- **Runtime least privilege, per table.** The Lambda role gets `GetItem` /
-  `PutItem` / `Query` on the items table and **`GetItem` only** on the users
-  table — so a compromised Lambda still can't create or alter keys. Minting keys
-  requires your deploy credentials (`npm run user`).
-- **Public endpoint + key.** The Function URL is `authType: NONE` because Joey
-  can't sign SigV4 requests; access is gated by the per-user API key checked in
-  [`lambda/mcp-server/index.ts`](lambda/mcp-server/index.ts) (Bearer header, or
-  `/mcp/<key>` path for Claude). **Revoke** anyone with `npm run user -- revoke`.
-- **Deploy least privilege (to tighten later).** `AdministratorAccess` on a
-  dedicated non-root user with MFA is the pragmatic solo-account choice. To lock
-  deploys down further, use a CDK **permissions boundary** and a scoped
-  CloudFormation execution policy — see `cdk bootstrap --help`
-  (`--cloudformation-execution-policies`, `--custom-permissions-boundary`).
-- **Stronger auth?** For real OAuth per user instead of shared bearer keys, see
-  the [MCP authorization spec](https://modelcontextprotocol.io/specification);
-  Joey supports OAuth MCP servers. The key model here is plenty for you + friends.
+- **Keys stored hashed.** The users table holds only `SHA-256(key)`; keys are
+  shown once at creation. The key lives only in the user's browser.
+- **HTTPS for the credential.** The site is served over CloudFront HTTPS (private
+  S3 bucket + Origin Access Control), never a plain-HTTP S3 endpoint, so the API
+  key is never typed into an insecure page.
+- **Runtime least privilege.** The chat Lambda gets `Get/Put/Query/Delete` on the
+  items/daily tables and **`GetItem` only** on the users table — a compromised
+  Lambda still can't mint keys. It reaches OpenAI over the internet (no IAM).
+- **Deploy least privilege.** Scoped deploy/exec policies + a permissions boundary
+  are in [`iam/`](iam/README.md) — apply them to shrink a leaked credential's
+  blast radius to this stack.
+- **`OPENAI_API_KEY`** is injected as a Lambda env var from `.env` (kept out of
+  git). That's $0 and simplest for a personal app; for stricter handling swap in an
+  SSM SecureString and grant the Lambda `ssm:GetParameter`.
 
 ## Cost
 
-Lambda and DynamoDB here are in AWS's **permanent** Always-Free tier (not the
-12-month-only tier). The free DynamoDB allowance (**25 GB + 25 RCU + 25 WCU**) is
-**shared across all tables in the account**, and the two small tables here
-provision only 10 RCU / 6 WCU combined — so a personal food log realistically
-costs **$0/month indefinitely**. As a safety net, the stack provisions an **AWS
-Budgets** cost alarm (default **$1/month**) that emails you if anything ever costs
-money — set `ALERT_EMAIL` in `.env`, tune with `MONTHLY_BUDGET_USD`.
+AWS: Lambda + DynamoDB sit in the **permanent** Always-Free tier (25 GB + 25 RCU +
+25 WCU shared account-wide; the three small tables provision well under that), and
+CloudFront's free tier (1 TB out / month) covers personal use. A personal tracker
+realistically costs **~$0/month on AWS**. As a canary, the stack provisions an
+**AWS Budgets** alarm (default **$1/month**) that emails you if the AWS bill ever
+moves; set `ALERT_EMAIL` in `.env` to enable it plus a kill switch.
 
-Avoid adding a VPC/NAT Gateway — that's the most common source of surprise AWS
-charges, and this project doesn't need one.
+**OpenAI is billed separately** by OpenAI. `gpt-5-nano` is inexpensive, but the
+nutrition web-search adds tokens; watch usage in the OpenAI dashboard. Avoid adding
+a VPC/NAT Gateway — the most common source of surprise AWS charges, and unneeded here.
 
-## Redeploying after an architecture/runtime change ⚠️
+## Redeploying — things that change a URL ⚠️
 
-Changing the Lambda's `Architecture` (e.g. x86_64 → arm64) forces CloudFormation
-to **replace** the function. The Function URL's hostname is derived from the
-function's identity, so **replacing the function changes the URL** — the old one
-stops working. After such a deploy, copy the new `McpServerUrl` and re-give it to
-each user's client. Ordinary code/config updates don't replace the function and
-don't change the URL. (The same applies to changing a table's key schema — it
-replaces the table; with `RemovalPolicy.RETAIN` you'd need to drop the old one
-first. There's no data yet, so it's a non-issue on first deploy.)
-
-## Dependency note
-
-`@modelcontextprotocol/sdk` is on `^1.29.0`. Some earlier `1.25.x` releases had a
-reported regression with Lambda Function URLs
-([typescript-sdk#1417](https://github.com/modelcontextprotocol/typescript-sdk/issues/1417));
-if you bump the SDK and streaming breaks, check that issue and the smoke test above.
+- Changing the chat Lambda's **architecture** or **runtime** forces a function
+  *replacement*, which changes the **Function URL** (`ChatApiUrl`). CDK rewrites
+  the site's `config.json` on the next deploy, so the app keeps working — but a
+  standalone consumer of the API would need the new URL.
+- Changing a table's **key schema** replaces the table; both are
+  `RemovalPolicy.RETAIN`, so the old one lingers and blocks the rename. Fine on a
+  fresh deploy; otherwise it needs a migration.
 
 ## Useful commands
 
 | Command | What it does |
 |---------|--------------|
-| `npm run setup` | Full from-scratch install + deploy + first user (macOS) |
-| `npm run build` | Type-check the whole project (`tsc --noEmit`) — no AWS calls |
+| `npm run setup` | Full from-scratch install + build + deploy + first user (macOS) |
+| `npm run build` | Type-check the backend (`tsc --noEmit`) — no AWS calls |
+| `npm run build:web` | Install web deps + build the React app into `web/dist` |
+| `npm run deploy` | `build:web` then `cdk deploy` |
 | `npm run user -- <add\|list\|revoke>` | Manage users / API keys |
-| `npx cdk diff` | Show what a deploy would change |
-| `npx cdk synth` | Synthesize the CloudFormation template locally |
-| `npx cdk deploy` | Deploy / update the stack |
-| `npx cdk destroy` | Tear down (both tables are `RETAIN`, so data survives) |
+| `npx cdk diff` / `synth` | Preview / synthesize the stack (needs `web/dist` built) |
+| `npx cdk destroy` | Tear down (tables are `RETAIN`, so data survives) |

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * Manage food-tracker users (API keys). Runs LOCALLY with your AWS deploy
+ * Manage tracker users (API keys). Runs LOCALLY with your AWS deploy
  * credentials — it is not part of the Lambda. The Lambda can only READ the
  * users table; minting/revoking keys happens here.
  *
- *   npm run user -- add --name "Alaric" [--url <McpServerUrl>] [--user <existingUserId>] [--only-if-empty]
+ *   npm run user -- add --name "Alaric" [--url <SiteUrl>] [--user <existingUserId>] [--only-if-empty]
  *   npm run user -- list
  *   npm run user -- revoke --name "Friend"        # or --user usr_xxxx
  *
@@ -19,7 +19,7 @@ import {
   ScanCommand,
   DeleteCommand,
 } from "@aws-sdk/lib-dynamodb";
-import { hashApiKey } from "../lambda/mcp-server/hash";
+import { hashApiKey } from "../lambda/shared/hash";
 import type { UserRecord } from "../types";
 
 const USERS_TABLE_NAME = process.env.USERS_TABLE_NAME ?? "food-tracker-users";
@@ -84,10 +84,9 @@ async function cmdAdd(args: Args): Promise<void> {
   console.log(`   userId: ${userId}`);
   console.log("\n🔑 API key (shown ONCE — copy it now, it cannot be recovered):");
   console.log(`   ${apiKey}`);
-  console.log("\nJoey settings for this person:");
-  console.log(`   URL:     ${base || "<McpServerUrl from 'cdk deploy'>"}`);
-  console.log(`   Headers: Authorization: Bearer ${apiKey}`);
-  if (base) console.log(`\nClaude custom-connector URL: ${base}/${apiKey}`);
+  console.log("\nHow this person signs in:");
+  console.log(`   1. Open the web app: ${base || "<SiteUrl from 'cdk deploy'>"}`);
+  console.log("   2. Open ⚙︎ Settings and paste this API key (stored only in their browser).");
 }
 
 async function cmdList(): Promise<void> {

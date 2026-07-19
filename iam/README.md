@@ -7,11 +7,29 @@ credential can touch **only** this stack's resources — not the whole account.
 |---|---|---|
 | **Deploy/operator user** | The human/CI IAM user whose keys run `cdk deploy` and `npm run user` | [`deploy-user-policy.json`](deploy-user-policy.json) |
 | **CDK CloudFormation execution role** | `cdk-hnb659fds-cfn-exec-role-*`, the role CloudFormation assumes to create resources during a deploy. **AdministratorAccess by default.** | [`cdk-exec-scoped-policy.json`](cdk-exec-scoped-policy.json) |
-| **Permissions boundary** | A cap attached to *every role this stack creates* (Lambda runtime role, budget-action role), so none can ever exceed the app's real needs — even if a broader policy is attached. | [`permissions-boundary-policy.json`](permissions-boundary-policy.json) |
+| **Permissions boundary** | A cap attached to *every role this stack creates* (chat Lambda runtime role, budget-action role, and the CDK `BucketDeployment` / auto-delete custom-resource roles), so none can ever exceed the app's real needs — even if a broader policy is attached. | [`permissions-boundary-policy.json`](permissions-boundary-policy.json) |
 
-> The Lambda **runtime** role is created by the stack and is already least-privilege
-> in code (`lib/food-tracker-stack.ts` — DynamoDB actions on the three tables only).
-> The boundary is a second, independent ceiling on it.
+> The chat Lambda **runtime** role is created by the stack and is already
+> least-privilege in code (`lib/food-tracker-stack.ts` — DynamoDB actions on the
+> three tables only; it reaches OpenAI over the internet, which needs no IAM).
+> The boundary is a second, independent ceiling. Because a boundary is an
+> *intersection*, the extra S3/CloudFront entries below don't grant the chat
+> Lambda anything — its identity policy is DynamoDB-only — they exist so the
+> deploy-time custom-resource roles (which upload the site + invalidate the CDN)
+> can function under the same cap.
+
+### What each policy now covers
+
+- **`cdk-exec-scoped-policy.json`** grew two statements: `ManageStackSiteBucket`
+  (create/configure the private site bucket, scoped to `foodtrackermcpstack-*`)
+  and `ManageStackCloudFront`. CloudFront's `Create*` actions **don't support
+  resource-level scoping**, so that statement uses `Resource: "*"` — the operator
+  identity is otherwise locked to this stack, so the blast radius is limited to
+  CloudFront management. `lambda:InvokeFunction` was added so CloudFormation can
+  drive the `BucketDeployment` custom resource during a deploy.
+- **`permissions-boundary-policy.json`** grew `SiteDeploymentS3Access` (read the
+  CDK assets bucket, write the site bucket) and `SiteDeploymentCloudFrontInvalidate`,
+  which the `BucketDeployment` / auto-delete Lambdas need.
 
 Before applying: replace `<ACCOUNT_ID>` in all three files, and confirm the region
 is `us-east-1` (change if you deploy elsewhere). The `hnb659fds` string is CDK's
@@ -86,8 +104,9 @@ Without a boundary, the scoped exec role could still create an IAM role named
 Two things (both in step 1) shut that down:
 
 1. **The boundary** (`permissions-boundary-policy.json`) caps every stack-created
-   role to logs + the three DynamoDB tables + the kill-switch attach. Even if a
-   broader policy were attached, effective permissions = policy ∩ boundary.
+   role to logs + the three DynamoDB tables + the site/asset S3 buckets +
+   CloudFront invalidation + the kill-switch attach. Even if a broader policy
+   were attached, effective permissions = policy ∩ boundary.
 2. **The exec policy's `iam:PermissionsBoundary` condition** means the exec role
    can *only* create roles that carry that boundary — a boundary-less role can't
    be created during a deploy at all.
