@@ -9,31 +9,48 @@ breaking things.
 An **AI calorie/macro tracker web app** in a personal AWS account:
 
 - **React + Vite + Tailwind SPA** (`web/`) on S3 + CloudFront — a streaming chat UI.
-- **A streaming Lambda backend** (`lambda/chat`) that holds the system prompt and
-  runs the agentic loop against **OpenAI `gpt-5-nano`**, calling tools in-process.
-- **Tools** (`lambda/shared/tools.ts`) backed by DynamoDB plus an internet
-  **nutrition search** (`lambda/shared/nutrition-search.ts`) that web-searches
-  facts for common foods and returns them in our per-oz/floz storage shape.
+- **A streaming Lambda backend** (`lambda/chat`) that runs a **deterministic
+  pipeline** around **OpenAI `gpt-5-nano`** (see below), not a free-form agent loop.
+- **Deterministic workflows** (`lambda/shared/workflows.ts`) backed by DynamoDB
+  (`db.ts`), a code-only macro validator (`nutrition.ts`), and an internet
+  **nutrition search** (`nutrition-search.ts`) in our per-oz/floz storage shape.
 
-The model is meant to be *dumb*; correctness lives in the database and in
-deterministic serving-size math (`units.ts`). **One API key = one user**, isolated
-in its own DynamoDB partition.
+The model is deliberately kept *dumb and narrow*: it only classifies intent and
+phrases the reply. Correctness lives in the database, in deterministic serving-size
+math (`units.ts`), and in the 4/4/9 validator (`nutrition.ts`). **One API key =
+one user**, isolated in its own DynamoDB partition.
 
-> This was previously a remote MCP server driven by an external client (Joey +
-> OpenRouter). That is **gone** — there is no MCP transport, no `@modelcontextprotocol/sdk`,
-> no Express, no OpenRouter. The app now owns the model and the loop end-to-end.
+> This was previously (1) a remote MCP server (Joey + OpenRouter) and then (2) a
+> single free-form OpenAI tool-calling loop with one big system prompt. Both are
+> **gone**. There is no MCP transport, no `zod` tool registry, no `dispatch()`, no
+> `system-prompt.ts`. Each LLM call now has one narrow job; plain TypeScript owns
+> the control flow, math, and validation.
 
 ## Architecture / data flow
 
 ```
 Browser (React SPA) → POST /{messages} + Bearer key → Chat Lambda (Function URL, RESPONSE_STREAM)
   → resolveUser(key) → userId
-  → agentic loop: streamChatCompletion(messages, tools)  [OpenAI gpt-5-nano]
-       ├─ text deltas  → streamed to the browser as SSE
-       └─ tool_calls   → dispatch(userId, name, args)  → DynamoDB / web-search
+  → 1. parseIntent(history)          [LLM, strict JSON]   → { intent, items, … }
+  → 2. runWorkflow(userId, intent, emit)   [plain TypeScript]
+         ├─ db.ts (find/add/log/list/delete)            → DynamoDB
+         ├─ reconcileMacros()  [no LLM]                 → 4/4/9 validation
+         ├─ searchNutritionFacts()  [LLM, web_search]   → per-oz/floz facts
+         ├─ checkPlausibility()  [LLM, only if flagged] → search / ask / accept
+         └─ emit("<tool_name>", "start"|"end")          → SSE tool chips
+       → returns a structured WorkflowResult
+  → 3. narrateResult(history, result) [LLM, streamed]   → SSE text deltas
   → SSE: {type:"delta"|"tool"|"error"|"done"}
 ```
 
+- **Pipeline, not an agent.** The LLM never sequences tools or does math. Intent
+  → deterministic workflow → validation → narration. Keep each LLM call single-
+  purpose; put logic/branching/CRUD in `workflows.ts`, not in a prompt.
+- **Confirm before writing.** A web-looked-up food is returned as a `proposal`
+  (no DB write); it's saved+logged only on the next turn's `confirm`. That pending
+  state lives in the conversation history (the backend is stateless), so
+  `parseIntent` re-reads the prior proposal to build the `confirm` — no server
+  session. Known/complete foods and explicit user numbers write directly.
 - **Stateless backend.** The browser sends the full conversation each turn;
   durable state (foods, daily log) lives in DynamoDB. Don't add in-memory state
   expecting it to persist across invocations.
@@ -41,9 +58,11 @@ Browser (React SPA) → POST /{messages} + Bearer key → Chat Lambda (Function 
   URL with `InvokeMode.RESPONSE_STREAM`. It is **not** Express — it parses the
   Function-URL event itself. Auth happens *before* the 200 stream opens so failures
   can return 401/403 (see `writeError`).
-- **In-process tools.** No network hop for tools; `dispatch()` calls the handler
-  directly. `search_nutrition_facts` is the one tool that itself calls OpenAI
-  (Responses API + `web_search`).
+- **Tool-chip names are a UI contract.** `emit()` uses the 8 legacy names
+  (`find_food_item`, `add_food_item`, `add_food_to_daily_count`, `add_alias`,
+  `list_daily_entries`, `delete_daily_entry`, `delete_food_item`,
+  `search_nutrition_facts`); `web/src/api.ts:toolLabel()` maps them to chip labels.
+  Reuse those names for real data ops; internal LLM steps emit no chip.
 
 ## File map
 
@@ -51,19 +70,24 @@ Browser (React SPA) → POST /{messages} + Bearer key → Chat Lambda (Function 
 |------|------|--------------------|
 | `bin/iac.ts` | CDK app entry | Reads `.env`: `OPENAI_API_KEY` (required), `ALERT_EMAIL`, `MONTHLY_BUDGET_USD`. |
 | `lib/food-tracker-stack.ts` | The whole stack | 3 tables, chat Lambda + streaming URL, S3+CloudFront site, `BucketDeployment`, budget/kill-switch. Stack id stays `FoodTrackerMcpStack`. |
-| `lambda/chat/index.ts` | Streaming orchestrator | `awslambda.streamifyResponse`; auth → OpenAI loop → SSE. `MAX_TURNS`/`MAX_HISTORY` guard rails. |
+| `lambda/chat/index.ts` | Streaming shell | `awslambda.streamifyResponse`; auth → `parseIntent` → `runWorkflow` → `narrateResult` → SSE. `MAX_HISTORY` guard rail. |
 | `lambda/chat/awslambda.d.ts` | Ambient types | Declares the runtime-provided `awslambda` globals. **Force-tracked** despite `.gitignore`'s `*.d.ts`. |
-| `lambda/shared/tools.ts` | Tool registry | `TOOLS[]` (name, Zod schema, handler). `toOpenAITools()` (via `z.toJSONSchema`), `dispatch()`. Single source of truth for tools. |
-| `lambda/shared/openai.ts` | OpenAI client | `fetch`-based, no SDK. `streamChatCompletion()` (SSE parse + tool-call assembly), `responseJsonSchema()` (web search + strict JSON). Models via env. |
-| `lambda/shared/nutrition-search.ts` | Nutrition lookup | `searchNutritionFacts(query)` → `NutritionFacts` shaped like `AddFoodItemInput`. |
-| `lambda/shared/system-prompt.ts` | Assistant persona | Single source of truth for behavior + tool policy + daily targets. Edit here, redeploy. |
-| `lambda/shared/db.ts` | Food + daily helpers | All `(userId, …)`. Normalization + daily-tracker logic. |
-| `lambda/shared/units.ts` | Serving math | `computeQuantityFromServing(serving, amountEaten)`; refuses on unit mismatch. |
+| `lambda/shared/intent.ts` | Orchestrator LLM | `parseIntent(history)` → strict-JSON `Intent`. Owns its prompt. Classifies + extracts; **no math, no invented numbers**. |
+| `lambda/shared/workflows.ts` | Deterministic control flow | `runWorkflow(userId, intent, emit)` → `WorkflowResult`. One fn per intent; sequences db/search/validation. **Where logic goes.** |
+| `lambda/shared/nutrition.ts` | Macro validator (no LLM) | `reconcileMacros()` (4/4/9: fill 1 missing / flag impossible / suspect field), `computeRemaining()`. Pure — unit-tested. |
+| `lambda/shared/sanity.ts` | Plausibility LLM | `checkPlausibility()` → `{status, suspected_field, action}`. Owns its prompt. World-knowledge only; no DB, no math, no tools. |
+| `lambda/shared/responder.ts` | Narrate-only LLM | `narrateResult(history, result)` streams the reply. Owns its prompt. **Only phrases pre-computed numbers.** |
+| `lambda/shared/targets.ts` | Daily targets | Plain data `TARGETS`. Edit your numbers here, redeploy. |
+| `lambda/shared/openai.ts` | OpenAI client | `fetch`-based, no SDK. `streamChatCompletion()` (tools optional), `responseJsonSchema()` (strict JSON + web search). Models via env. |
+| `lambda/shared/nutrition-search.ts` | Nutrition lookup | `searchNutritionFacts(query)` → `NutritionFacts`. Its result must pass `reconcileMacros` before any save. |
+| `lambda/shared/db.ts` | Food + daily helpers | All `(userId, …)`. Normalization + daily-tracker logic. Unchanged by the pipeline refactor. |
+| `lambda/shared/units.ts` | Serving math | `computeQuantityFromServing(serving, amountEaten)`; refuses on unit mismatch. Unit-tested. |
 | `lambda/shared/users.ts` / `hash.ts` | Auth lookup / hashing | `resolveUser` reads users table by key hash; `hashApiKey` shared with the CLI. |
-| `web/src/App.tsx` | Chat UI | Streaming render, tool chips, settings modal (key + backend URL). |
-| `web/src/api.ts` | Browser client | `streamChat()` SSE reader, `loadConfig()` (fetches `/config.json`), `toolLabel()`. |
-| `types.ts` | Shared types | `FoodItem`, `UserRecord`, tool I/O. |
+| `web/src/App.tsx` | Chat UI | Streaming render, tool chips, settings modal (key + backend URL). **Unchanged — do not edit for backend work.** |
+| `web/src/api.ts` | Browser client | `streamChat()` SSE reader, `loadConfig()`, `toolLabel()` (the 8 chip names). The wire contract the backend must preserve. |
+| `types.ts` | Shared domain types | `FoodItem`, `DailyTrackerEntry`, `UserRecord`, tool I/O. Pipeline types are co-located in their modules. |
 | `scripts/manage-users.ts` | Admin CLI | `add`/`list`/`revoke`; local, with deploy creds. NOT in the Lambda. |
+| `lambda/shared/*.test.ts` | Unit tests | `vitest run` (`npm test`). Cover `nutrition.ts` + `units.ts` (deterministic core). |
 
 ## Data model (get this right)
 
@@ -118,17 +142,26 @@ Browser (React SPA) → POST /{messages} + Bearer key → Chat Lambda (Function 
 - **Lambda is read-only on the users table** by design — never widen it to write keys.
 - **Secrets.** API keys are shown once by `manage-users.ts` and stored as hashes.
   Never log a raw key or the OpenAI key; never commit either.
-- **No tests yet.** If you add logic to `db.ts`/`units.ts`, prefer a small harness
-  over manual DynamoDB pokes; ask before introducing a test framework.
+- **Tests exist now (vitest).** `npm test` runs `lambda/**/*.test.ts`. When you add
+  or change logic in `nutrition.ts` / `units.ts` (the deterministic core), add a
+  failure-case test alongside it. The LLM-driven modules (`intent`/`sanity`/
+  `responder`) aren't unit-tested (they'd need a live model) — keep their prompts
+  narrow instead.
 
 ## Where to make common changes
 
-- **New tool** → add an entry to `TOOLS` in `lambda/shared/tools.ts` (Zod schema +
-  `(userId, args)` handler), a helper in `db.ts` if it touches storage, and any new
-  shape in `types.ts`. It's automatically exposed to the model — no other wiring.
-- **Change the assistant's behavior / targets** → `lambda/shared/system-prompt.ts`.
+- **New capability / user action** → add a value to `IntentName` + its fields in
+  `lambda/shared/intent.ts` (schema + prompt line), add a `case` and a handler
+  function in `lambda/shared/workflows.ts`, and a `db.ts` helper if it touches
+  storage. If it surfaces a new tool chip, use an existing `emit()` name or add the
+  label to `web/src/api.ts:toolLabel()` (a rare, deliberate frontend touch).
+- **Change your daily targets** → `lambda/shared/targets.ts`.
+- **Change how a step behaves** → that step's own prompt: `intent.ts` (what gets
+  parsed), `sanity.ts` (plausibility calls), `responder.ts` (reply tone).
+- **Change macro/validation rules** → `lambda/shared/nutrition.ts` (+ a test).
 - **New stored food field** → extend `FoodItem` + `AddFoodItemInput` in `types.ts`,
-  the schema in `tools.ts`, and the record built in `db.ts:addFoodItem`.
+  the record built in `db.ts:addFoodItem`, and the extraction in `intent.ts`/
+  `workflows.ts` if the model should populate it.
 - **Frontend** → `web/src/App.tsx` + `web/src/api.ts`; rebuild with `npm run build:web`.
 - **Infra change** → `lib/food-tracker-stack.ts`; re-check free-tier, key-schema,
   and Function-URL-identity notes above, and update `iam/` if new services are used.

@@ -5,18 +5,23 @@ ate in plain words; it looks up nutrition facts (from your own database, or the
 open web when it doesn't know a food), keeps a running daily log, and tells you
 what you have left against your targets — all backed by **your own DynamoDB**.
 
-The whole point is to make logging effortless: the model does the talking and the
-tool-calling, but correctness lives in the database and in deterministic
-serving-size math, not in the model's head.
+The whole point is to make logging effortless *and* reliable: the model only
+understands what you mean and phrases the reply — it never does the arithmetic or
+decides what's correct. Intent parsing, a deterministic macro validator, the
+database, and serving-size math do the real work, so a weak model can't drop a
+constraint.
 
 It's three things, all in your personal AWS account:
 
 - **A React web app** (static, on S3 + CloudFront) — a clean streaming chat UI.
-- **A streaming Lambda backend** — holds the system prompt and runs the agentic
-  loop against **OpenAI `gpt-5-nano`**, calling food/daily tools in-process.
-- **An internet nutrition search** — a tool that web-searches nutrition facts for
-  common foods (ribeye, oatmeal, …) and converts them to our per-oz/floz storage
-  shape, used automatically when a food is unknown or your data is incomplete.
+- **A streaming Lambda backend** — a small **deterministic pipeline** around
+  **OpenAI `gpt-5-nano`**: one call classifies your intent, plain TypeScript
+  workflows sequence the database/search/validation, and one call narrates the
+  result. Each model call has a single, narrow job.
+- **An internet nutrition search** — web-searches nutrition facts for common
+  foods (ribeye, oatmeal, …) and converts them to our per-oz/floz storage shape,
+  used automatically when a food is unknown or your data is incomplete. Its output
+  always passes through the deterministic validator before it can be saved.
 
 **Multi-user:** one API key = one user. Each person's food data is completely
 isolated in its own DynamoDB partition. Add or revoke users anytime, no redeploy.
@@ -33,41 +38,68 @@ Browser (React app on CloudFront + S3, HTTPS)
   ▼
 Chat Orchestrator Lambda  (Function URL, RESPONSE_STREAM, gpt-5-nano)
   ├─ resolve API key → userId                              (users table, read-only)
-  ├─ agentic loop with OpenAI + tools:
-  │     ├─ find_food_item / add_food_item / add_food_to_daily_count / …  → DynamoDB
-  │     └─ search_nutrition_facts → OpenAI Responses web_search → per-oz/floz facts
-  └─ streams token deltas + tool activity back to the browser
+  ├─ 1. parseIntent()  → { intent, items, … }              (one LLM call; no math)
+  ├─ 2. runWorkflow()  → plain TypeScript control flow:
+  │        find/add/log/list/delete            → DynamoDB
+  │        reconcileMacros()                   → deterministic 4/4/9 validation
+  │        searchNutritionFacts()              → OpenAI Responses web_search
+  │        checkPlausibility()  (only if a value looks off)  → one narrow LLM call
+  │        → emits tool-chip events + returns a fully-computed result
+  └─ 3. narrateResult() → one LLM call that only phrases the result, streamed back
 ```
 
 The browser holds the conversation and sends it each turn; the backend is
 **stateless** (durable state — foods and the daily log — lives in DynamoDB). The
 API key is stored only in the browser (localStorage) and sent as a Bearer header.
 
-### Tools the model can call
+### Why a pipeline instead of one agent
 
-| Tool | What it does |
-|------|--------------|
-| `find_food_item` | Look up a saved food by name/alias (exact, partial, then fuzzy) |
-| `search_nutrition_facts` | Web-search nutrition facts for a common food → per oz/floz |
-| `add_food_item` | Save a food's calories/macros + serving (oz/floz) |
-| `add_alias` | Add an alternative name to a saved food |
-| `add_food_to_daily_count` | Log a food into today's totals (converts `amountEaten` for you) |
-| `list_daily_entries` | List today's entries + cumulative totals |
-| `delete_daily_entry` | Remove one logged entry (renumbers + recomputes totals) |
-| `delete_food_item` | Delete a saved food |
+The model used to run a free-form tool-calling loop and was told, in prose, to
+reconcile macros, convert servings, and not invent numbers — and it regularly
+dropped one of those. Now responsibilities are split so each step is small and
+checkable:
 
-Typical flow: *"I ate 6oz ribeye"* → `find_food_item` (miss) →
-`search_nutrition_facts` → `add_food_item` (saves ribeye per-oz) →
-`add_food_to_daily_count` with `amountEaten: "6oz"`. The Lambda divides 6oz by the
-saved serving to get the multiplier, so the model never does the arithmetic.
+- **Intent parser** (LLM) — decides *what you want* and copies any numbers you
+  stated verbatim. It never computes or invents a value.
+- **Workflows** (plain TypeScript) — sequence the database/search calls, one
+  action per turn, so there are no accidental extra writes.
+- **Macro validator** (`reconcileMacros`, no LLM) — enforces
+  `calories ≈ 4·protein + 4·carbs + 9·fat`: fills a single missing value, and
+  flags impossible combinations (e.g. 70 g fat in a 110-cal serving).
+- **Sanity check** (LLM, only when needed) — a real-world plausibility judgment
+  that can trigger a web lookup; it can't touch the database or do math.
+- **Responder** (LLM) — phrases the already-computed result. Every number it says
+  came from code.
+
+**Confirm before writing.** When a food isn't saved yet, the app looks it up,
+validates it, and *proposes* it — it saves and logs only after you say yes. That
+confirmation is carried in the conversation itself, so the stateless backend
+needs no server-side session.
+
+Typical flow: *"I ate 6oz ribeye"* → look up (miss) → web search → validate →
+"Found ribeye 4oz = 280 cal, 25g protein… save & log 6oz?" → *"yes"* → saved +
+logged. The server divides 6oz by the saved serving to get the multiplier, so the
+model never does the arithmetic.
 
 ### Serving-size math (why it's reliable)
 
 Servings are stored as a precise weight (`oz`) or volume (`floz`), never freeform
-text. When you report an amount, the model converts it to oz/floz and the server
-divides it by the saved serving to get the multiplier — deterministic, and it
-refuses on a unit mismatch instead of guessing (see
+text. When you report an amount, the intent parser restates it in oz/floz and the
+server divides it by the saved serving to get the multiplier — deterministic, and
+it refuses on a unit mismatch instead of guessing (see
 [`lambda/shared/units.ts`](lambda/shared/units.ts)).
+
+### Macro validation (the 4/4/9 rule, in code)
+
+[`lambda/shared/nutrition.ts`](lambda/shared/nutrition.ts) enforces
+`calories ≈ 4·protein + 4·carbs + 9·fat` deterministically — the model is never
+asked to do this arithmetic. Given any three of the four values it computes the
+fourth (e.g. *150 cal, 30 g protein, 3 g fat* → *~0.8 g carbs*); given all four it
+checks they reconcile within tolerance and, when they don't, names the field most
+likely wrong (e.g. *110 cal, 70 g fat, …* → invalid, suspect **fat**). Every value
+— whether you typed it or it came from the web search — passes through this gate
+before it can be saved. Covered by
+[`lambda/shared/nutrition.test.ts`](lambda/shared/nutrition.test.ts) (`npm test`).
 
 ### Data model — three DynamoDB tables
 
@@ -99,13 +131,17 @@ calorie-tracker/
 ├── lib/food-tracker-stack.ts      CDK stack: 3 tables + chat Lambda + streaming URL +
 │                                   S3/CloudFront site + BucketDeployment + budget guardrail
 ├── lambda/
-│   ├── chat/index.ts              Streaming orchestrator: auth + OpenAI agentic loop + SSE
+│   ├── chat/index.ts              Streaming shell: auth → parseIntent → runWorkflow → narrate → SSE
 │   ├── chat/awslambda.d.ts        Ambient types for the Lambda streaming globals
 │   └── shared/
-│       ├── tools.ts               Tool registry: schemas + handlers + OpenAI adapter + dispatch
-│       ├── openai.ts              fetch-based OpenAI client (streaming chat + web search)
+│       ├── intent.ts              Orchestrator LLM: classify intent + extract fields (own prompt)
+│       ├── workflows.ts           Deterministic control flow, one function per intent
+│       ├── nutrition.ts           Deterministic 4/4/9 validation + remaining-vs-targets (no LLM)
+│       ├── sanity.ts              Plausibility LLM: is this believable for that food? (own prompt)
+│       ├── responder.ts           Narrate-only LLM: phrases the computed result, streamed (own prompt)
+│       ├── targets.ts             Your daily targets as plain data (EDIT here)
+│       ├── openai.ts              fetch-based OpenAI client (streaming chat + strict-JSON/web search)
 │       ├── nutrition-search.ts    Web-search nutrition lookup → per-oz/floz facts
-│       ├── system-prompt.ts       The assistant persona + tool policy + daily targets (EDIT here)
 │       ├── db.ts                  Food-item + daily helpers (all userId-scoped)
 │       ├── units.ts               amountEaten → serving-multiplier math
 │       ├── users.ts               resolve API key → user
@@ -188,13 +224,20 @@ Each `add` mints a new user with isolated data. (`--user <userId>` gives someone
 second key that shares existing data.) An API key is a password to that user's
 data — it's shown only once.
 
-## Tuning the assistant (persona + your targets)
+## Tuning the assistant (targets + prompts)
 
-Everything about how the model behaves — its persona, the tool-use policy, and
-**your daily targets** — lives in one file:
-[`lambda/shared/system-prompt.ts`](lambda/shared/system-prompt.ts). Edit the
-"Daily targets" block to your numbers and `npx cdk deploy`. To trade cost/quality,
-override `OPENAI_CHAT_MODEL` / `OPENAI_SEARCH_MODEL` (see `.env.example`).
+- **Your daily targets** are plain data in
+  [`lambda/shared/targets.ts`](lambda/shared/targets.ts) — edit the numbers and
+  `npx cdk deploy`. "What's left today" is computed from these in code, never by
+  the model.
+- **How each step behaves** lives in that step's own module, one prompt per
+  responsibility: the intent classifier in
+  [`lambda/shared/intent.ts`](lambda/shared/intent.ts), the plausibility check in
+  [`lambda/shared/sanity.ts`](lambda/shared/sanity.ts), and the reply's tone in
+  [`lambda/shared/responder.ts`](lambda/shared/responder.ts).
+
+To trade cost/quality, override `OPENAI_CHAT_MODEL` / `OPENAI_SEARCH_MODEL` (see
+`.env.example`).
 
 ## Security
 
@@ -244,6 +287,7 @@ a VPC/NAT Gateway — the most common source of surprise AWS charges, and unneed
 |---------|--------------|
 | `npm run setup` | Full from-scratch install + build + deploy + first user (macOS) |
 | `npm run build` | Type-check the backend (`tsc --noEmit`) — no AWS calls |
+| `npm test` | Run the backend unit tests (validation + serving math) with vitest — no AWS calls |
 | `npm run build:web` | Install web deps + build the React app into `web/dist` |
 | `npm run deploy` | `build:web` then `cdk deploy` |
 | `npm run user -- <add\|list\|revoke>` | Manage users / API keys |

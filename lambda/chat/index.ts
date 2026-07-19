@@ -1,17 +1,26 @@
 /**
  * Chat orchestrator — the backend for the web app. This is a Lambda RESPONSE_STREAM
  * handler on a Function URL: the browser POSTs the conversation, we authenticate
- * the user's API key, run the agentic loop against OpenAI (gpt-5-nano) with our
- * tools, and stream the assistant's tokens + tool activity back as Server-Sent
- * Events so the reply renders "on the fly".
+ * the user's API key, then run a deterministic pipeline and stream the reply back
+ * as Server-Sent Events.
  *
- * Stateless like the old MCP server: the browser holds the message history and
- * sends it each turn; the durable state (foods, daily log) lives in DynamoDB.
+ * The pipeline is intentionally NOT one autonomous agent. Each step is small:
+ *   1. parseIntent()   — one LLM call: classify the message + extract fields.
+ *   2. runWorkflow()   — plain TypeScript: sequences DB/search calls, runs the
+ *                        deterministic macro validator, and (only when needed) a
+ *                        narrow sanity LLM. Emits tool-chip events. Returns a
+ *                        structured result. Never does math itself.
+ *   3. narrateResult() — one LLM call: phrase the already-computed result, streamed.
+ *
+ * Stateless: the browser holds the message history and sends it each turn; durable
+ * state (foods, daily log) lives in DynamoDB. A pending confirmation lives in the
+ * conversation history, so `confirm` works across turns with no server state.
  */
 import { resolveUser } from "../shared/users";
-import { SYSTEM_PROMPT } from "../shared/system-prompt";
-import { streamChatCompletion, type ChatMessage } from "../shared/openai";
-import { dispatch, toOpenAITools } from "../shared/tools";
+import { parseIntent } from "../shared/intent";
+import { runWorkflow } from "../shared/workflows";
+import { narrateResult } from "../shared/responder";
+import type { ChatMessage } from "../shared/openai";
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -26,8 +35,7 @@ const SSE_HEADERS: Record<string, string> = {
   "X-Accel-Buffering": "no",
 };
 
-// Safety rails on the loop so a misbehaving model can't spin forever / rack cost.
-const MAX_TURNS = 8;
+// Cap retained client turns so a runaway history can't blow up token cost.
 const MAX_HISTORY = 40;
 
 type ClientEvent =
@@ -133,30 +141,18 @@ export const handler = awslambda.streamifyResponse(
         return;
       }
 
-      const messages: ChatMessage[] = [
-        { role: "system", content: SYSTEM_PROMPT },
-        ...history,
-      ];
-      const tools = toOpenAITools();
+      // 1. Understand intent (one narrow LLM call).
+      const intent = await parseIntent(history);
 
-      for (let turn = 0; turn < MAX_TURNS; turn++) {
-        let assistant: ChatMessage | undefined;
-        for await (const ev of streamChatCompletion(messages, tools)) {
-          if (ev.type === "text") send({ type: "delta", text: ev.delta });
-          else if (ev.type === "done") assistant = ev.message;
-        }
-        if (!assistant) break;
-        messages.push(assistant);
+      // 2. Run the matching deterministic workflow. It emits tool-chip events for
+      //    each real data operation and returns a fully-computed result.
+      const result = await runWorkflow(userId, intent, (name, phase) =>
+        send({ type: "tool", name, phase })
+      );
 
-        const toolCalls = assistant.tool_calls ?? [];
-        if (toolCalls.length === 0) break;
-
-        for (const tc of toolCalls) {
-          send({ type: "tool", name: tc.function.name, phase: "start" });
-          const result = await dispatch(userId, tc.function.name, tc.function.arguments);
-          send({ type: "tool", name: tc.function.name, phase: "end" });
-          messages.push({ role: "tool", tool_call_id: tc.id, content: result });
-        }
+      // 3. Narrate the result (one narrow LLM call), streamed to the browser.
+      for await (const delta of narrateResult(history, result)) {
+        if (delta) send({ type: "delta", text: delta });
       }
 
       send({ type: "done" });

@@ -65,18 +65,23 @@ function authHeaders(): Record<string, string> {
  */
 export async function* streamChatCompletion(
   messages: ChatMessage[],
-  tools: OpenAITool[]
+  tools: OpenAITool[] = []
 ): AsyncGenerator<StreamEvent> {
+  const body: Record<string, unknown> = {
+    model: CHAT_MODEL,
+    messages,
+    stream: true,
+  };
+  // Only advertise tools when there are any — the responder streams tool-free,
+  // and OpenAI rejects an empty `tools: []`.
+  if (tools.length > 0) {
+    body.tools = tools;
+    body.tool_choice = "auto";
+  }
   const res = await fetch(`${BASE_URL}/chat/completions`, {
     method: "POST",
     headers: authHeaders(),
-    body: JSON.stringify({
-      model: CHAT_MODEL,
-      messages,
-      tools,
-      tool_choice: "auto",
-      stream: true,
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!res.ok || !res.body) {
