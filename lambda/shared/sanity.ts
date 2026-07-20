@@ -43,6 +43,7 @@ const INSTRUCTIONS = `You are a nutrition plausibility checker for a calorie & m
 
 Rules:
 - Do NOT do arithmetic — a separate deterministic step already checked that calories match the macros. Your job is real-world plausibility (e.g. "chocolate cake with 70 g fat but only 110 calories" is not believable; "olive oil with 0 g protein" is fine).
+- Weigh the numbers against the stated serving size. The same food name can be plausible or not depending on how big a serving is (e.g. one muffin at 200 cal is believable, but one muffin at 1200 cal is not; an entire batch of pancakes at 1200 cal is believable). If no serving size is given, judge the food name as commonly served.
 - If the numbers look realistic, return status="valid", suspected_field=null, action="accept".
 - If something looks clearly wrong, return status="suspect", name the single most suspicious field, and set action="search" so the app can look up reliable values.
 - Use action="ask" only when the food name is too vague to judge at all.
@@ -56,6 +57,7 @@ export type SanityInput = {
   proteinG: number;
   fatG: number;
   carbsG: number;
+  servingSize?: string;
   /** A short description of what the deterministic layer concluded. */
   deterministicVerdict: string;
 };
@@ -63,6 +65,7 @@ export type SanityInput = {
 export async function checkPlausibility(input: SanityInput): Promise<SanityVerdict> {
   const facts =
     `Food: ${input.name}\n` +
+    (input.servingSize ? `Serving size: ${input.servingSize}\n` : "") +
     `Per serving: ${input.calories} cal, ${input.proteinG} g protein, ` +
     `${input.carbsG} g carbs, ${input.fatG} g fat\n` +
     `Deterministic math check: ${input.deterministicVerdict}`;

@@ -27,6 +27,7 @@ import { checkPlausibility } from "./sanity";
 import { searchNutritionFacts, type NutritionFacts } from "./nutrition-search";
 import type { FoodSpec, Intent } from "./intent";
 import type { DailyTrackerEntry, FoodItem, ServingSize } from "../../types";
+import { formatServing } from "./units";
 
 export type Emit = (name: string, phase: "start" | "end") => void;
 
@@ -209,6 +210,7 @@ async function searchViaWeb(
       proteinG: facts.proteinG,
       fatG: facts.fatG,
       carbsG: facts.carbsG,
+      ...(facts.serving ? { servingSize: `${formatServing(facts.serving)}` } : {}),
       deterministicVerdict: `stated ${v.statedCalories} cal vs computed ${v.computedCalories} cal; suspect ${v.suspect.field}`,
     });
     if (verdict.action === "search") {

@@ -58,7 +58,7 @@ const INSTRUCTIONS = `You are a nutrition-facts researcher for a calorie and mac
 Given a food, search the web for reliable nutrition information (USDA FoodData Central, manufacturer labels, or reputable databases) and report values PER SERVING.
 
 Rules:
-- Express the serving as a precise weight in ounces ('oz') or volume in fluid ounces ('floz') — convert grams (1 oz = 28.35 g) or cups (1 cup = 8 floz) yourself. Use 'oz' for solids, 'floz' for liquids.
+- Express the serving as the closest precise weight in ounces ('oz') or volume in fluid ounces ('floz') — convert grams (1 oz = 28.35 g) or cups (1 cup = 8 floz) yourself. Use 'oz' for solids, 'floz' for liquids.
 - Prefer a natural, common serving (e.g. 4 oz raw for a steak, 1 oz dry for oatmeal). State it in sourceNote.
 - Calories must reconcile with macros: calories ≈ 4×protein + 4×carbs + 9×fat. Adjust to a consistent set of numbers rather than reporting values that don't add up.
 - Round macros to whole or one-decimal grams. Return numbers only.`;

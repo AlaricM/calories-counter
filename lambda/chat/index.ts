@@ -58,15 +58,15 @@ function extractApiKey(event: any): string | undefined {
   return undefined;
 }
 
-function parseBody(event: any): any {
-  if (!event.body) return {};
+function parseBody<T>(event: any): T | null {
+  if (!event.body) return null;
   const raw = event.isBase64Encoded
     ? Buffer.from(event.body, "base64").toString("utf8")
     : event.body;
   try {
-    return JSON.parse(raw);
+    return JSON.parse(raw) as T;
   } catch {
-    return {};
+    return null;
   }
 }
 
@@ -132,7 +132,7 @@ export const handler = awslambda.streamifyResponse(
     const send = (evt: ClientEvent) => stream.write(`data: ${JSON.stringify(evt)}\n\n`);
 
     try {
-      const body = parseBody(event);
+      const body = parseBody<{ messages: unknown[] }>(event) ?? {messages: []};
       const history = sanitizeHistory(body.messages);
       if (history.length === 0) {
         send({ type: "error", message: "No messages provided." });
