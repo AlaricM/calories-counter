@@ -10,6 +10,7 @@
  */
 
 import { responseJsonSchema, CHAT_MODEL } from "./openai";
+import type { JsonSchemaObject } from "./json-schema";
 import type { MacroField } from "./nutrition";
 
 export type SanityVerdict = {
@@ -22,7 +23,7 @@ export type SanityVerdict = {
   note: string;
 };
 
-const SANITY_SCHEMA: Record<string, unknown> = {
+const SANITY_SCHEMA: JsonSchemaObject<SanityVerdict> = {
   type: "object",
   additionalProperties: false,
   properties: {

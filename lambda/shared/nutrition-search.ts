@@ -10,6 +10,7 @@
  */
 
 import { responseJsonSchema, SEARCH_MODEL } from "./openai";
+import type { JsonSchemaObject } from "./json-schema";
 import type { ServingSize } from "../../types";
 
 export type NutritionFacts = {
@@ -23,7 +24,7 @@ export type NutritionFacts = {
   sourceNote: string;
 };
 
-const NUTRITION_SCHEMA: Record<string, unknown> = {
+const NUTRITION_SCHEMA: JsonSchemaObject<NutritionFacts> = {
   type: "object",
   additionalProperties: false,
   properties: {

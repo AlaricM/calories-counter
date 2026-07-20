@@ -14,6 +14,8 @@
  * without a code change.
  */
 
+import type { JsonSchemaObject } from "./json-schema";
+
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
 export const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL ?? "gpt-5-nano";
 export const SEARCH_MODEL = process.env.OPENAI_SEARCH_MODEL ?? "gpt-5-nano";
@@ -164,12 +166,12 @@ export async function* streamChatCompletion(
  * tool). Uses strict JSON-schema structured output so the returned text always
  * parses into the expected shape.
  */
-export async function responseJsonSchema<T>(opts: {
+export async function responseJsonSchema<T extends object>(opts: {
   model: string;
   instructions: string;
   input: string;
   schemaName: string;
-  schema: Record<string, unknown>;
+  schema: JsonSchemaObject<T>;
   webSearch?: boolean;
 }): Promise<T> {
   const body: Record<string, unknown> = {

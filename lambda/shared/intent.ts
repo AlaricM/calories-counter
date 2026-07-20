@@ -8,6 +8,7 @@
  */
 
 import { responseJsonSchema, CHAT_MODEL, type ChatMessage } from "./openai";
+import type { JsonSchemaObject } from "./json-schema";
 import type { ServingUnit } from "../../types";
 
 /** A single food the user mentioned (to log, to save, or to confirm). */
@@ -53,7 +54,7 @@ export type Intent = {
 // OpenAI strict structured output requires every property to be listed in
 // `required` and additionalProperties:false; optionality is expressed by
 // allowing null in the type.
-const FOOD_SPEC_SCHEMA: Record<string, unknown> = {
+const FOOD_SPEC_SCHEMA: JsonSchemaObject<FoodSpec> = {
   type: "object",
   additionalProperties: false,
   properties: {
@@ -86,7 +87,7 @@ const FOOD_SPEC_SCHEMA: Record<string, unknown> = {
   ],
 };
 
-const INTENT_SCHEMA: Record<string, unknown> = {
+const INTENT_SCHEMA: JsonSchemaObject<Intent> = {
   type: "object",
   additionalProperties: false,
   properties: {
