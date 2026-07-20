@@ -9,7 +9,11 @@ import {
 import type { AddFoodItemInput, DailyTrackerEntry, FoodItem, ServingSize } from "../../types";
 import { computeQuantityFromServing, formatServing } from "./units";
 
-const client = new DynamoDBClient({});
+// AWS_ENDPOINT_URL lets local dev point DynamoDB at LocalStack. It's never set in
+// production (Lambda talks to real DynamoDB), so this is a no-op there.
+const client = new DynamoDBClient(
+  process.env.AWS_ENDPOINT_URL ? { endpoint: process.env.AWS_ENDPOINT_URL } : {}
+);
 const doc = DynamoDBDocumentClient.from(client);
 const TABLE_NAME = process.env.TABLE_NAME!;
 const DAILY_TABLE_NAME = process.env.DAILY_TABLE_NAME!;

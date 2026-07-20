@@ -148,15 +148,56 @@ calorie-tracker/
 │       └── hash.ts                SHA-256 of an API key (shared with the admin CLI)
 ├── web/                           React + Vite + Tailwind chat app (builds to web/dist)
 │   └── src/{App.tsx, api.ts, main.tsx, index.css}
-├── types.ts                       Shared types
-├── scripts/{manage-users.ts, bootstrap.sh}
+├── types.ts                       Shared domain types
+├── scripts/{manage-users.ts, bootstrap.sh,
+│            dev-server.ts,        Local backend: runs the real handler via an awslambda shim (:8787)
+│            dev-seed.ts}          Local: create tables in LocalStack + load db.sample.json
+├── docker-compose.yml            Local: LocalStack (DynamoDB) for `npm run dev:up`
+├── db.sample.json                Local: dev user + seed food library
 ├── iam/                           Least-privilege deploy/runtime policies (see iam/README.md)
 └── .env.example                   OPENAI_API_KEY (+ optional cost alerts)
 ```
 
 ---
 
-# From scratch: zero to running
+# Local development (run the whole app on your machine)
+
+Run the full app locally with **no AWS account** — LocalStack (Docker) provides
+DynamoDB, the chat backend runs as a local Node process, and Vite serves the UI.
+The one thing that isn't local is **OpenAI** (there's no local model): set
+`OPENAI_API_KEY` in `.env` for real replies, or the app runs but chat requests
+return an error, exactly like an un-keyed deploy.
+
+> Why not run the Lambda in LocalStack too? The app relies on a **streaming**
+> Function URL (`RESPONSE_STREAM`) plus CloudFront/S3/Budgets, which LocalStack's
+> community edition doesn't emulate. Running the *real* handler
+> ([`lambda/chat/index.ts`](lambda/chat/index.ts)) as a local process — via a tiny
+> `awslambda` streaming shim in [`scripts/dev-server.ts`](scripts/dev-server.ts) —
+> gives true SSE, instant reload, and the exact production code path.
+
+**One-time per machine:** Docker Desktop running, then `cp .env.example .env` and
+(optionally) set `OPENAI_API_KEY`.
+
+```bash
+npm run dev:up      # start LocalStack (DynamoDB) in Docker  [pinned to the free 3.x community image]
+npm run dev:seed    # create the 3 tables + load db.sample.json (idempotent; re-run after a restart)
+npm run dev:api     # start the chat backend on http://localhost:8787   (terminal A)
+npm run dev:web     # start the React app on   http://localhost:5173    (terminal B)
+```
+
+Then open <http://localhost:5173>, click **⚙︎ Settings**, and set **Backend URL**
+`http://localhost:8787` and **API key** `dev-key` (both from `db.sample.json`,
+saved in your browser). Edit [`db.sample.json`](db.sample.json) to change the
+seeded foods/users and re-run `npm run dev:seed`. Tear down with `npm run dev:down`
+(DynamoDB data is in-memory, so it resets each time).
+
+The local backend talks to LocalStack via `AWS_ENDPOINT_URL` (honored by
+[`db.ts`](lambda/shared/db.ts) / [`users.ts`](lambda/shared/users.ts)); that env
+var is never set in production, so deploys are unaffected.
+
+---
+
+# From scratch: zero to running (deploy to AWS)
 
 Steps 1–4 are **manual** (you can't script an AWS account or an OpenAI key).
 Everything after is one command: [`scripts/bootstrap.sh`](scripts/bootstrap.sh).

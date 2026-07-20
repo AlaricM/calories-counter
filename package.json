@@ -15,7 +15,12 @@
     "destroy": "cdk destroy",
     "user": "tsx scripts/manage-users.ts",
     "setup": "bash scripts/bootstrap.sh",
-    "test": "vitest run"
+    "test": "vitest run",
+    "dev:up": "docker compose up -d",
+    "dev:down": "docker compose down",
+    "dev:seed": "tsx scripts/dev-seed.ts",
+    "dev:api": "tsx scripts/dev-server.ts",
+    "dev:web": "npm --prefix web run dev"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.162",

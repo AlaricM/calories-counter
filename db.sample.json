@@ -1,0 +1,17 @@
+{
+  "_comment": "Local-dev seed data loaded into LocalStack DynamoDB by `npm run dev:seed`. `apiKey` is stored only as its SHA-256 hash (like production). Foods are chosen to roughly satisfy calories ≈ 4·protein + 4·carbs + 9·fat.",
+  "users": [
+    { "userId": "usr_dev", "name": "Local Dev", "apiKey": "dev-key" }
+  ],
+  "items": [
+    { "userId": "usr_dev", "item": "Ribeye steak", "aliases": ["ribeye"], "calories": 291, "proteinG": 24, "fatG": 22, "carbsG": 0, "serving": { "quantity": 4, "unit": "oz" } },
+    { "userId": "usr_dev", "item": "Chicken breast", "aliases": ["chicken"], "calories": 176, "proteinG": 33, "fatG": 4, "carbsG": 0, "serving": { "quantity": 4, "unit": "oz" } },
+    { "userId": "usr_dev", "item": "Rolled oats", "aliases": ["oats", "oatmeal"], "calories": 110, "proteinG": 4, "fatG": 2, "carbsG": 19, "serving": { "quantity": 1, "unit": "oz" } },
+    { "userId": "usr_dev", "item": "Whole milk", "aliases": ["milk"], "calories": 150, "proteinG": 8, "fatG": 8, "carbsG": 12, "serving": { "quantity": 8, "unit": "floz" } },
+    { "userId": "usr_dev", "item": "Olive oil", "aliases": [], "calories": 120, "proteinG": 0, "fatG": 14, "carbsG": 0, "serving": { "quantity": 0.5, "unit": "floz" } },
+    { "userId": "usr_dev", "item": "Greek yogurt", "aliases": ["yogurt"], "calories": 100, "proteinG": 17, "fatG": 0, "carbsG": 6, "serving": { "quantity": 6, "unit": "oz" } },
+    { "userId": "usr_dev", "item": "Almonds", "aliases": [], "calories": 164, "proteinG": 6, "fatG": 14, "carbsG": 6, "serving": { "quantity": 1, "unit": "oz" } },
+    { "userId": "usr_dev", "item": "Banana", "aliases": [], "calories": 105, "proteinG": 1, "fatG": 0, "carbsG": 27 }
+  ],
+  "daily": []
+}

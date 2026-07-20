@@ -1,0 +1,18 @@
+# Local development only — NOT part of the deployed stack.
+#
+# LocalStack stands in for AWS DynamoDB so the whole app can run on your machine.
+# The streaming chat Lambda itself runs as a local Node process (scripts/dev-server.ts)
+# — LocalStack's community edition doesn't emulate a streaming Function URL — and
+# the React app runs under Vite. See the "Local development" section of README.md.
+services:
+  localstack:
+    # Pinned to the 3.x community line — it runs DynamoDB with no license/token.
+    # (Newer `:latest` builds refuse to start without a paid LOCALSTACK_AUTH_TOKEN.)
+    image: localstack/localstack:3
+    container_name: calorie-tracker-localstack
+    ports:
+      - "4566:4566" # the single edge port all LocalStack services share
+    environment:
+      - SERVICES=dynamodb
+      - DEBUG=0
+    # DynamoDB data is ephemeral (in-memory). Re-run `npm run dev:seed` after a restart.

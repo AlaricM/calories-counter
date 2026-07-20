@@ -127,6 +127,12 @@ Browser (React SPA) → POST /{messages} + Bearer key → Chat Lambda (Function 
   anything that mutates AWS unless the human explicitly asks and confirms the target
   account.** `npm run build` and offline `cdk synth` are local and safe. This repo
   targets a *specific personal* account.
+- **Local dev (no AWS).** `npm run dev:up` (LocalStack/DynamoDB in Docker, pinned to
+  the free `localstack/localstack:3`) → `dev:seed` (tables + `db.sample.json`) →
+  `dev:api` (real handler via an `awslambda` shim in `scripts/dev-server.ts`, :8787)
+  → `dev:web` (Vite, :5173). Set Settings → `http://localhost:8787` + `dev-key`.
+  `AWS_ENDPOINT_URL` redirects DynamoDB to LocalStack and is **only** ever set in
+  local dev — never wire it into the stack. OpenAI is still remote (needs a key).
 - **`OPENAI_API_KEY` is required at runtime** (Lambda env var from `.env`). The app
   deploys without it but every chat request errors until it's set + redeployed.
 - **The web app must be built before synth/deploy.** `lib/food-tracker-stack.ts`

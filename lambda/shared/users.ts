@@ -3,7 +3,10 @@ import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { UserRecord } from "../../types";
 import { hashApiKey } from "./hash";
 
-const client = new DynamoDBClient({});
+// AWS_ENDPOINT_URL lets local dev point at LocalStack; unset (and a no-op) in production.
+const client = new DynamoDBClient(
+  process.env.AWS_ENDPOINT_URL ? { endpoint: process.env.AWS_ENDPOINT_URL } : {}
+);
 const doc = DynamoDBDocumentClient.from(client);
 const USERS_TABLE_NAME = process.env.USERS_TABLE_NAME!;
 
